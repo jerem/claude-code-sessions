@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Claude Code Sessions
+Comment=Browse and resume Claude Code sessions
+Exec=claude-code-sessions
+Icon=io.github.jerem.ClaudeCodeSessions
+Terminal=false
+Categories=Development;
+Keywords=claude;ai;terminal;session;
