@@ -217,12 +217,19 @@ def open_resume_terminal(session):
       2. xdg-terminal-exec      (the freedesktop default-terminal standard)
       3. first installed terminal we know how to drive (ghostty, ptyxis, …)
     """
-    cwd = session.cwd if os.path.isdir(session.cwd) else os.path.expanduser("~")
+    # The session's working directory. Don't validate it with os.path.isdir()
+    # when sandboxed: the Flatpak only mounts ~/.claude, so project dirs read as
+    # missing and we'd fall back to $HOME — where `claude --resume` can't find
+    # the session. The dir exists on the host, so trust it and let the host
+    # shell fall back if it's genuinely gone.
+    cwd = session.cwd
+    if not in_flatpak() and not os.path.isdir(cwd):
+        cwd = os.path.expanduser("~")
     # Login shell so PATH/nvm/etc. are set up. cd explicitly (a flatpak-spawned
     # host process starts in $HOME, not our cwd), then drop to an interactive
     # shell once Claude exits so the window stays open.
     resume = f"{shlq(claude_bin())} --resume {shlq(session.session_id)}"
-    shell_cmd = f"cd {shlq(cwd)} && {resume}; exec $SHELL"
+    shell_cmd = f"cd {shlq(cwd)} 2>/dev/null || cd; {resume}; exec $SHELL"
     run_cmd = ["bash", "-lc", shell_cmd]
 
     candidates = []
