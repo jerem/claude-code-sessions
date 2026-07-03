@@ -60,7 +60,8 @@ def parse_session(path):
     big assistant payloads — only the handful of lines that carry metadata.
     """
     cwd = None
-    title = None
+    title = None          # AI-generated title ("ai-title")
+    custom_title = None   # user-set name via /rename ("custom-title")
     first_prompt = None
     prompts = []          # the user-side text, for content search
     prompt_chars = 0
@@ -76,6 +77,12 @@ def parse_session(path):
                 if '"aiTitle"' in line:
                     try:
                         title = json.loads(line).get("aiTitle") or title
+                    except json.JSONDecodeError:
+                        pass
+                if '"customTitle"' in line:
+                    try:
+                        custom_title = (json.loads(line).get("customTitle")
+                                        or custom_title)
                     except json.JSONDecodeError:
                         pass
                 if (prompt_chars < PROMPT_CAP
@@ -99,11 +106,13 @@ def parse_session(path):
         # Fall back to decoding the directory name (slashes were turned to '-').
         cwd = "/" + path.parent.name.lstrip("-").replace("-", "/")
 
-    display_title = title or first_prompt or "(untitled session)"
+    # A user's /rename (custom-title) wins over the auto-generated ai-title.
+    display_title = custom_title or title or first_prompt or "(untitled session)"
     if len(display_title) > 90:
         display_title = display_title[:89] + "…"
 
-    blob = " ".join([title or "", cwd, path.stem, " ".join(prompts)]).lower()
+    blob = " ".join([custom_title or "", title or "", cwd, path.stem,
+                     " ".join(prompts)]).lower()
 
     return Session(
         session_id=path.stem,
