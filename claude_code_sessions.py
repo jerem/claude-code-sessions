@@ -330,11 +330,7 @@ class SessionRow(Adw.ActionRow):
         self.stars = stars
         self.on_star_changed = on_star_changed
         self._refresh_title()
-        self.set_subtitle(
-            GLib.markup_escape_text(
-                f"{session.cwd}  ·  {human_age(session.mtime)}"
-            )
-        )
+        self._refresh_subtitle()
         self.set_title_lines(1)
         self.set_subtitle_lines(1)
         self.set_activatable(True)
@@ -347,10 +343,11 @@ class SessionRow(Adw.ActionRow):
         self.star.connect("toggled", self._on_star_toggled)
         self.add_prefix(self.star)
 
-        # Resume (suffix).
+        # Resume (suffix). Reference self.session so it stays correct if the
+        # row's session is updated in place after a file change.
         resume = Gtk.Button(label="Resume", valign=Gtk.Align.CENTER)
         resume.add_css_class("suggested-action")
-        resume.connect("clicked", lambda *_: on_resume(session))
+        resume.connect("clicked", lambda *_: on_resume(self.session))
         self.add_suffix(resume)
 
         # Overflow menu: Rename…, Delete.
@@ -376,10 +373,20 @@ class SessionRow(Adw.ActionRow):
         menu.set_popover(popover)
         self.add_suffix(menu)
 
-        self.connect("activated", lambda *_: on_resume(session))
+        self.connect("activated", lambda *_: on_resume(self.session))
 
     def _refresh_title(self):
         self.set_title(GLib.markup_escape_text(self.session.title))
+
+    def _refresh_subtitle(self):
+        self.set_subtitle(GLib.markup_escape_text(
+            f"{self.session.cwd}  ·  {human_age(self.session.mtime)}"))
+
+    def update_session(self, session):
+        """Replace the row's data in place after the session file changed."""
+        self.session = session
+        self._refresh_title()
+        self._refresh_subtitle()
 
     def _refresh_star_icon(self):
         active = self.star.get_active()
@@ -404,7 +411,11 @@ class Window(Adw.ApplicationWindow):
         self.set_title("Claude Code Sessions")
         self.set_default_size(720, 760)
         self.all_rows = []
+        self.rows_by_id = {}
         self.stars = Stars()
+        self._monitors = []
+        self._monitored = set()
+        self._rescan_pending = False
 
         toolbar = Adw.ToolbarView()
         self.set_content(toolbar)
@@ -456,6 +467,7 @@ class Window(Adw.ApplicationWindow):
         self.stack.add_named(scroller, "list")
 
         self.reload()
+        self._setup_monitor()
 
     @staticmethod
     def _section_header(text, top=False):
@@ -476,37 +488,111 @@ class Window(Adw.ApplicationWindow):
         return lb
 
     def reload(self):
-        self.stack.set_visible_child_name("status")
-        self.status.set_icon_name("content-loading-symbolic")
-        self.status.set_title("Loading sessions…")
-        self.status.set_description(None)
+        # Only show the loading screen on the very first scan; later scans
+        # (manual refresh or file-change driven) diff in place without flashing.
+        if not self.all_rows:
+            self.stack.set_visible_child_name("status")
+            self.status.set_icon_name("content-loading-symbolic")
+            self.status.set_title("Loading sessions…")
+            self.status.set_description(None)
         threading.Thread(target=self._scan_worker, daemon=True).start()
 
     def _scan_worker(self):
         sessions = scan_sessions()
-        GLib.idle_add(self._populate, sessions)
+        GLib.idle_add(self._apply, sessions)
 
-    def _populate(self, sessions):
-        self.fav_listbox.remove_all()
-        self.all_listbox.remove_all()
-        self.all_rows = []
+    def _apply(self, sessions):
+        """Reconcile the current rows with a fresh scan, touching only what
+        actually changed (add / remove / retitle), preserving scroll + search."""
+        new_by_id = {s.session_id: s for s in sessions}
 
-        if not sessions:
+        # Removed sessions.
+        for sid in list(self.rows_by_id):
+            if sid not in new_by_id:
+                row = self.rows_by_id.pop(sid)
+                parent = row.get_parent()
+                if parent is not None:
+                    parent.remove(row)
+                if row in self.all_rows:
+                    self.all_rows.remove(row)
+
+        # New and changed sessions.
+        for sid, s in new_by_id.items():
+            row = self.rows_by_id.get(sid)
+            if row is None:
+                row = SessionRow(s, self.stars, self._resume,
+                                 self._confirm_rename, self._confirm_delete,
+                                 self._on_star_changed)
+                self.rows_by_id[sid] = row
+                self.all_rows.append(row)
+                self._target_list(row).append(row)
+            else:
+                old = row.session
+                if (old.title, old.mtime, old.cwd) != (s.title, s.mtime, s.cwd):
+                    row.update_session(s)
+
+        if not self.all_rows:
             self.status.set_icon_name("dialog-information-symbolic")
             self.status.set_title("No sessions found")
             self.status.set_description(f"Looked in {PROJECTS_DIR}")
             self.stack.set_visible_child_name("status")
-            return
-
-        for s in sessions:
-            row = SessionRow(s, self.stars, self._resume, self._confirm_rename,
-                             self._confirm_delete, self._on_star_changed)
-            self.all_rows.append(row)
-            self._target_list(row).append(row)
+            return False
 
         self.stack.set_visible_child_name("list")
-        self._filter()
+        self.fav_listbox.invalidate_sort()   # re-order for any changed mtimes
+        self.all_listbox.invalidate_sort()
+        self._filter()                        # apply search + section visibility
         return False
+
+    # -- Live updates: watch ~/.claude/projects and diff on change ----------- #
+    def _setup_monitor(self):
+        if not PROJECTS_DIR.is_dir():
+            return
+        self._watch_dir(Gio.File.new_for_path(str(PROJECTS_DIR)))
+        try:
+            for child in PROJECTS_DIR.iterdir():
+                if child.is_dir():
+                    self._watch_dir(Gio.File.new_for_path(str(child)))
+        except OSError:
+            pass
+
+    def _watch_dir(self, gfile):
+        path = gfile.get_path()
+        if path in self._monitored:
+            return
+        try:
+            monitor = gfile.monitor_directory(
+                Gio.FileMonitorFlags.WATCH_MOVES, None)
+        except GLib.Error:
+            return
+        monitor.connect("changed", self._on_dir_changed)
+        self._monitors.append(monitor)
+        self._monitored.add(path)
+
+    def _on_dir_changed(self, _monitor, gfile, _other, event):
+        # A brand-new project directory needs its own watch so we see the
+        # session files created inside it.
+        if event == Gio.FileMonitorEvent.CREATED:
+            try:
+                is_dir = (gfile.query_file_type(
+                    Gio.FileQueryInfoFlags.NONE, None) == Gio.FileType.DIRECTORY)
+            except GLib.Error:
+                is_dir = False
+            if is_dir:
+                self._watch_dir(gfile)
+        self._schedule_rescan()
+
+    def _schedule_rescan(self):
+        # Coalesce bursts of writes into at most one rescan per ~800ms.
+        if self._rescan_pending:
+            return
+        self._rescan_pending = True
+        GLib.timeout_add(800, self._fire_rescan)
+
+    def _fire_rescan(self):
+        self._rescan_pending = False
+        threading.Thread(target=self._scan_worker, daemon=True).start()
+        return False  # one-shot
 
     def _sort_by_recent(self, a, b):
         return ((b.session.mtime > a.session.mtime)

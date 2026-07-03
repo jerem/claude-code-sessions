@@ -67,6 +67,11 @@ config directory, not in `~/.claude`.
   Claude Code.
 - **Delete** — *⋮ → Delete* asks for confirmation, then moves the session's
   `.jsonl` file to the trash (recoverable from your file manager).
+- **Live updates** — a `Gio.FileMonitor` on `~/.claude/projects` watches for
+  changes (debounced ~800 ms). New sessions, renames, deletions, and activity
+  bumps are reconciled *in place* — only the affected rows change, so your
+  scroll position and search text are preserved. The manual refresh button
+  forces an immediate re-scan.
 
 ### Which terminal opens
 
