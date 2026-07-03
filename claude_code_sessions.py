@@ -592,6 +592,7 @@ class App(Adw.Application):
     def do_activate(self):
         win = self.props.active_window or Window(self)
         win.present()
+        win.search.grab_focus()
 
 
 if __name__ == "__main__":
