@@ -64,6 +64,7 @@ def parse_session(path):
     big assistant payloads — only the handful of lines that carry metadata.
     """
     cwd = None
+    last_cwd_line = None  # the most recent line carrying a cwd
     title = None          # AI-generated title ("ai-title")
     custom_title = None   # user-set name via /rename ("custom-title")
     first_prompt = None
@@ -73,11 +74,11 @@ def parse_session(path):
     try:
         with open(path, "r", errors="replace") as fh:
             for line in fh:
-                if cwd is None and '"cwd"' in line:
-                    try:
-                        cwd = json.loads(line).get("cwd")
-                    except json.JSONDecodeError:
-                        pass
+                # Keep the *last* cwd: `/cd` changes it mid-session, and the
+                # session file moves to the new project dir, so the current cwd
+                # is what `claude --resume` needs (parse just this one line).
+                if '"cwd"' in line:
+                    last_cwd_line = line
                 if '"aiTitle"' in line:
                     try:
                         title = json.loads(line).get("aiTitle") or title
@@ -106,6 +107,11 @@ def parse_session(path):
     except OSError:
         return None
 
+    if last_cwd_line is not None:
+        try:
+            cwd = json.loads(last_cwd_line).get("cwd") or cwd
+        except json.JSONDecodeError:
+            pass
     if cwd is None:
         # Fall back to decoding the directory name (slashes were turned to '-').
         cwd = "/" + path.parent.name.lstrip("-").replace("-", "/")
