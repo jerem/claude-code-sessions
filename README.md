@@ -36,14 +36,16 @@ flatpak run io.github.jerem.ClaudeCodeSessions
 
 The sandbox is intentionally narrow:
 
-- `--filesystem=~/.claude:ro` — read the session logs (read-only).
+- `--filesystem=~/.claude` — read the session logs, and append a `custom-title`
+  entry when you rename a session. No access outside `~/.claude` is granted.
 - `--talk-name=org.freedesktop.Flatpak` — the only way to reach the host. The
   app shells out via `flatpak-spawn --host` to launch your terminal, run
   `claude --resume`, and `gio trash` deleted sessions — none of which exist
   inside the sandbox.
 
 It never needs broad home access: resumed terminals open as host processes, so
-they already see your real files.
+they already see your real files. Starred sessions are stored in the app's own
+config directory, not in `~/.claude`.
 
 ## How it works
 
@@ -57,7 +59,12 @@ they already see your real files.
 - **Resume** — clicking *Resume* (or a row) opens your default terminal in the
   session's working directory and runs `claude --resume <session-id>`. The
   shell stays open after Claude exits.
-- **Delete** — the trash button asks for confirmation, then moves the session's
+- **Star** — the star toggle pins a session to the top of the list (starred
+  first, then most recent). Stars persist in the app's config directory.
+- **Rename** — *⋮ → Rename…* sets a custom name by appending the same
+  `custom-title` entry that `/rename` writes, so the name also shows up inside
+  Claude Code.
+- **Delete** — *⋮ → Delete* asks for confirmation, then moves the session's
   `.jsonl` file to the trash (recoverable from your file manager).
 
 ### Which terminal opens

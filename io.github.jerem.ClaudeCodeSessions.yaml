@@ -10,8 +10,8 @@ finish-args:
   - --socket=wayland
   - --socket=fallback-x11
   - --device=dri
-  # Read the Claude Code session logs.
-  - --filesystem=~/.claude:ro
+  # Read the session logs, and append a custom-title entry when renaming.
+  - --filesystem=~/.claude
   # Run the host terminal + `claude`/`gio trash` via flatpak-spawn --host.
   # (The sandbox can't see or exec host binaries directly.)
   - --talk-name=org.freedesktop.Flatpak

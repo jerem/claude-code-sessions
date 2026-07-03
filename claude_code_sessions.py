@@ -21,6 +21,10 @@ from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
 
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
 APP_ID = "io.github.jerem.ClaudeCodeSessions"
+# Our own state (starred sessions). Maps to ~/.config outside the sandbox and to
+# ~/.var/app/<id>/config inside it — writable in both cases.
+STAR_PATH = (Path(GLib.get_user_config_dir())
+             / "claude-code-sessions" / "starred.json")
 
 
 # --------------------------------------------------------------------------- #
@@ -154,6 +158,47 @@ def human_age(mtime):
     return time.strftime("%Y-%m-%d", time.localtime(mtime))
 
 
+class Stars:
+    """Persistent set of starred session ids, stored as a small JSON file."""
+
+    def __init__(self):
+        self.ids = set()
+        try:
+            data = json.loads(STAR_PATH.read_text())
+            if isinstance(data, list):
+                self.ids = set(data)
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    def is_starred(self, session_id):
+        return session_id in self.ids
+
+    def set(self, session_id, starred):
+        if starred:
+            self.ids.add(session_id)
+        else:
+            self.ids.discard(session_id)
+        self._save()
+
+    def _save(self):
+        try:
+            STAR_PATH.parent.mkdir(parents=True, exist_ok=True)
+            tmp = STAR_PATH.with_suffix(".tmp")
+            tmp.write_text(json.dumps(sorted(self.ids)))
+            tmp.replace(STAR_PATH)  # atomic swap
+        except OSError:
+            pass
+
+
+def rename_session(session, new_title):
+    """Persist a custom name by appending the same entry `/rename` writes."""
+    entry = {"type": "custom-title",
+             "customTitle": new_title,
+             "sessionId": session.session_id}
+    with open(session.path, "a") as fh:
+        fh.write(json.dumps(entry) + "\n")
+
+
 # --------------------------------------------------------------------------- #
 # Terminal launching
 # --------------------------------------------------------------------------- #
@@ -278,10 +323,13 @@ def shlq(s):
 # UI
 # --------------------------------------------------------------------------- #
 class SessionRow(Adw.ActionRow):
-    def __init__(self, session, on_resume, on_delete):
+    def __init__(self, session, stars, on_resume, on_rename, on_delete,
+                 on_star_changed):
         super().__init__()
         self.session = session
-        self.set_title(GLib.markup_escape_text(session.title))
+        self.stars = stars
+        self.on_star_changed = on_star_changed
+        self._refresh_title()
         self.set_subtitle(
             GLib.markup_escape_text(
                 f"{session.cwd}  ·  {human_age(session.mtime)}"
@@ -291,24 +339,63 @@ class SessionRow(Adw.ActionRow):
         self.set_subtitle_lines(1)
         self.set_activatable(True)
 
-        folder = Gtk.Image.new_from_icon_name("folder-symbolic")
-        folder.add_css_class("dim-label")
-        self.add_prefix(folder)
+        # Star toggle (prefix).
+        self.star = Gtk.ToggleButton(valign=Gtk.Align.CENTER)
+        self.star.add_css_class("flat")
+        self.star.set_active(stars.is_starred(session.session_id))
+        self._refresh_star_icon()
+        self.star.connect("toggled", self._on_star_toggled)
+        self.add_prefix(self.star)
 
-        btn = Gtk.Button(label="Resume")
-        btn.set_valign(Gtk.Align.CENTER)
-        btn.add_css_class("suggested-action")
-        btn.connect("clicked", lambda *_: on_resume(session))
-        self.add_suffix(btn)
+        # Resume (suffix).
+        resume = Gtk.Button(label="Resume", valign=Gtk.Align.CENTER)
+        resume.add_css_class("suggested-action")
+        resume.connect("clicked", lambda *_: on_resume(session))
+        self.add_suffix(resume)
 
-        delete = Gtk.Button(icon_name="user-trash-symbolic")
-        delete.set_valign(Gtk.Align.CENTER)
-        delete.set_tooltip_text("Delete this session")
-        delete.add_css_class("flat")
-        delete.connect("clicked", lambda *_: on_delete(self))
-        self.add_suffix(delete)
+        # Overflow menu: Rename…, Delete.
+        menu = Gtk.MenuButton(icon_name="view-more-symbolic",
+                              valign=Gtk.Align.CENTER)
+        menu.add_css_class("flat")
+        menu.set_tooltip_text("More actions")
+        popover = Gtk.Popover(has_arrow=False)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        for label, cb, extra in (
+            ("Rename…", lambda: on_rename(self), None),
+            ("Delete", lambda: on_delete(self), "destructive-action"),
+        ):
+            item = Gtk.Button(label=label)
+            item.add_css_class("flat")
+            if extra:
+                item.add_css_class(extra)
+            item.get_child().set_halign(Gtk.Align.START)
+            item.connect("clicked",
+                         lambda _b, fn=cb: (popover.popdown(), fn()))
+            box.append(item)
+        popover.set_child(box)
+        menu.set_popover(popover)
+        self.add_suffix(menu)
 
         self.connect("activated", lambda *_: on_resume(session))
+
+    def _refresh_title(self):
+        self.set_title(GLib.markup_escape_text(self.session.title))
+
+    def _refresh_star_icon(self):
+        active = self.star.get_active()
+        self.star.set_icon_name(
+            "starred-symbolic" if active else "non-starred-symbolic")
+        self.star.set_tooltip_text("Unstar" if active else "Star")
+
+    def _on_star_toggled(self, _btn):
+        self.stars.set(self.session.session_id, self.star.get_active())
+        self._refresh_star_icon()
+        self.on_star_changed()
+
+    def apply_new_title(self, new_title):
+        self.session.title = new_title
+        self.session.search_blob += " " + new_title.lower()
+        self._refresh_title()
 
 
 class Window(Adw.ApplicationWindow):
@@ -317,6 +404,7 @@ class Window(Adw.ApplicationWindow):
         self.set_title("Claude Code Sessions")
         self.set_default_size(720, 760)
         self.all_rows = []
+        self.stars = Stars()
 
         toolbar = Adw.ToolbarView()
         self.set_content(toolbar)
@@ -359,6 +447,7 @@ class Window(Adw.ApplicationWindow):
         self.listbox.set_margin_start(12)
         self.listbox.set_margin_end(12)
         self.listbox.set_valign(Gtk.Align.START)
+        self.listbox.set_sort_func(self._sort_rows)
         clamp.set_child(self.listbox)
         self.stack.add_named(scroller, "list")
 
@@ -387,7 +476,8 @@ class Window(Adw.ApplicationWindow):
             return
 
         for s in sessions:
-            row = SessionRow(s, self._resume, self._confirm_delete)
+            row = SessionRow(s, self.stars, self._resume, self._confirm_rename,
+                             self._confirm_delete, self.listbox.invalidate_sort)
             self.listbox.append(row)
             self.all_rows.append(row)
 
@@ -395,10 +485,50 @@ class Window(Adw.ApplicationWindow):
         self._filter()
         return False
 
+    def _sort_rows(self, a, b):
+        # Starred first, then most-recently-active first.
+        sa = self.stars.is_starred(a.session.session_id)
+        sb = self.stars.is_starred(b.session.session_id)
+        if sa != sb:
+            return -1 if sa else 1
+        return (b.session.mtime > a.session.mtime) - (b.session.mtime < a.session.mtime)
+
     def _filter(self):
         terms = self.search.get_text().lower().split()
         for row in self.all_rows:
             row.set_visible(not terms or row.session.matches(terms))
+
+    def _confirm_rename(self, row):
+        entry = Gtk.Entry(text=row.session.title, activates_default=True,
+                          hexpand=True)
+        entry.set_margin_top(6)
+        dialog = Adw.AlertDialog(
+            heading="Rename session",
+            body="Set a custom name (as if you ran /rename in Claude Code).",
+        )
+        dialog.set_extra_child(entry)
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("rename", "Rename")
+        dialog.set_response_appearance("rename",
+                                       Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("rename")
+        dialog.set_close_response("cancel")
+        dialog.connect("response", self._on_rename_response, row, entry)
+        dialog.present(self)
+
+    def _on_rename_response(self, _dialog, response, row, entry):
+        if response != "rename":
+            return
+        new_title = entry.get_text().strip()
+        if not new_title or new_title == row.session.title:
+            return
+        try:
+            rename_session(row.session, new_title)
+        except OSError as exc:
+            self.toast.add_toast(Adw.Toast(title=f"Couldn't rename: {exc}"))
+            return
+        row.apply_new_title(new_title)
+        self.toast.add_toast(Adw.Toast(title="Session renamed"))
 
     def _confirm_delete(self, row):
         session = row.session
