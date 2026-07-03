@@ -390,7 +390,7 @@ class SessionRow(Adw.ActionRow):
     def _on_star_toggled(self, _btn):
         self.stars.set(self.session.session_id, self.star.get_active())
         self._refresh_star_icon()
-        self.on_star_changed()
+        self.on_star_changed(self)
 
     def apply_new_title(self, new_title):
         self.session.title = new_title
@@ -439,19 +439,41 @@ class Window(Adw.ApplicationWindow):
         scroller = Gtk.ScrolledWindow(vexpand=True)
         clamp = Adw.Clamp(maximum_size=900)
         scroller.set_child(clamp)
-        self.listbox = Gtk.ListBox()
-        self.listbox.set_selection_mode(Gtk.SelectionMode.NONE)
-        self.listbox.add_css_class("boxed-list")
-        self.listbox.set_margin_top(18)
-        self.listbox.set_margin_bottom(18)
-        self.listbox.set_margin_start(12)
-        self.listbox.set_margin_end(12)
-        self.listbox.set_valign(Gtk.Align.START)
-        self.listbox.set_sort_func(self._sort_rows)
-        clamp.set_child(self.listbox)
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        content.set_margin_top(18)
+        content.set_margin_bottom(18)
+        content.set_margin_start(12)
+        content.set_margin_end(12)
+        # Two sections: starred favorites on top, everything else below.
+        self.fav_header = self._section_header("Favorites")
+        self.fav_listbox = self._make_list()
+        self.all_header = self._section_header("All sessions", top=True)
+        self.all_listbox = self._make_list()
+        for w in (self.fav_header, self.fav_listbox,
+                  self.all_header, self.all_listbox):
+            content.append(w)
+        clamp.set_child(content)
         self.stack.add_named(scroller, "list")
 
         self.reload()
+
+    @staticmethod
+    def _section_header(text, top=False):
+        label = Gtk.Label(label=text, xalign=0)
+        label.add_css_class("heading")
+        label.add_css_class("dim-label")
+        label.set_margin_start(4)
+        label.set_margin_top(12 if top else 0)
+        label.set_margin_bottom(2)
+        return label
+
+    def _make_list(self):
+        lb = Gtk.ListBox()
+        lb.set_selection_mode(Gtk.SelectionMode.NONE)
+        lb.add_css_class("boxed-list")
+        lb.set_valign(Gtk.Align.START)
+        lb.set_sort_func(self._sort_by_recent)
+        return lb
 
     def reload(self):
         self.stack.set_visible_child_name("status")
@@ -465,7 +487,8 @@ class Window(Adw.ApplicationWindow):
         GLib.idle_add(self._populate, sessions)
 
     def _populate(self, sessions):
-        self.listbox.remove_all()
+        self.fav_listbox.remove_all()
+        self.all_listbox.remove_all()
         self.all_rows = []
 
         if not sessions:
@@ -477,26 +500,50 @@ class Window(Adw.ApplicationWindow):
 
         for s in sessions:
             row = SessionRow(s, self.stars, self._resume, self._confirm_rename,
-                             self._confirm_delete, self.listbox.invalidate_sort)
-            self.listbox.append(row)
+                             self._confirm_delete, self._on_star_changed)
             self.all_rows.append(row)
+            self._target_list(row).append(row)
 
         self.stack.set_visible_child_name("list")
         self._filter()
         return False
 
-    def _sort_rows(self, a, b):
-        # Starred first, then most-recently-active first.
-        sa = self.stars.is_starred(a.session.session_id)
-        sb = self.stars.is_starred(b.session.session_id)
-        if sa != sb:
-            return -1 if sa else 1
-        return (b.session.mtime > a.session.mtime) - (b.session.mtime < a.session.mtime)
+    def _sort_by_recent(self, a, b):
+        return ((b.session.mtime > a.session.mtime)
+                - (b.session.mtime < a.session.mtime))
+
+    def _target_list(self, row):
+        starred = self.stars.is_starred(row.session.session_id)
+        return self.fav_listbox if starred else self.all_listbox
+
+    def _on_star_changed(self, row):
+        # Move the row into the section that now matches its starred state.
+        target = self._target_list(row)
+        parent = row.get_parent()
+        if parent is not target:
+            if parent is not None:
+                parent.remove(row)
+            target.append(row)
+        self._update_sections()
 
     def _filter(self):
         terms = self.search.get_text().lower().split()
         for row in self.all_rows:
             row.set_visible(not terms or row.session.matches(terms))
+        self._update_sections()
+
+    def _update_sections(self):
+        # Show a section only when it has at least one row passing the filter;
+        # only label "All sessions" when the Favorites section is also shown.
+        fav = any(r.get_visible() and self.stars.is_starred(r.session.session_id)
+                  for r in self.all_rows)
+        others = any(r.get_visible()
+                     and not self.stars.is_starred(r.session.session_id)
+                     for r in self.all_rows)
+        self.fav_header.set_visible(fav)
+        self.fav_listbox.set_visible(fav)
+        self.all_header.set_visible(fav and others)
+        self.all_listbox.set_visible(others)
 
     def _confirm_rename(self, row):
         entry = Gtk.Entry(text=row.session.title, activates_default=True,
@@ -552,8 +599,8 @@ class Window(Adw.ApplicationWindow):
         session = row.session
         try:
             if in_flatpak():
-                # The sandbox has read-only access to the files and no trash
-                # backend; trash on the host where the file actually lives.
+                # The sandbox has no trash backend; trash on the host where the
+                # file actually lives (and where the trash directory is).
                 rc = on_host(["gio", "trash", session.path]).wait()
                 if rc != 0:
                     raise GLib.Error(f"gio trash exited with status {rc}")
@@ -562,7 +609,9 @@ class Window(Adw.ApplicationWindow):
         except GLib.Error as exc:
             self.toast.add_toast(Adw.Toast(title=f"Couldn't delete: {exc.message}"))
             return
-        self.listbox.remove(row)
+        parent = row.get_parent()
+        if parent is not None:
+            parent.remove(row)
         if row in self.all_rows:
             self.all_rows.remove(row)
         self.toast.add_toast(Adw.Toast(title="Session moved to trash"))
@@ -571,6 +620,8 @@ class Window(Adw.ApplicationWindow):
             self.status.set_title("No sessions found")
             self.status.set_description(f"Looked in {PROJECTS_DIR}")
             self.stack.set_visible_child_name("status")
+        else:
+            self._update_sections()
 
     def _resume(self, session):
         ok, term = open_resume_terminal(session)

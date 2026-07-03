@@ -59,8 +59,9 @@ config directory, not in `~/.claude`.
 - **Resume** — clicking *Resume* (or a row) opens your default terminal in the
   session's working directory and runs `claude --resume <session-id>`. The
   shell stays open after Claude exits.
-- **Star** — the star toggle pins a session to the top of the list (starred
-  first, then most recent). Stars persist in the app's config directory.
+- **Star** — the star toggle moves a session into a **Favorites** section shown
+  above the rest (each section ordered most-recent first). Stars persist in the
+  app's config directory.
 - **Rename** — *⋮ → Rename…* sets a custom name by appending the same
   `custom-title` entry that `/rename` writes, so the name also shows up inside
   Claude Code.
