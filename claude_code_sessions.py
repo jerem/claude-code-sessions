@@ -14,6 +14,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 from pathlib import Path
 
 import gi
@@ -379,6 +380,16 @@ def host_mkdir(path):
     except OSError as exc:
         return exc.strerror or str(exc)
     return None
+
+
+_SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+def slugify(name):
+    """Turn a session name into a directory name: "My Café App" -> my-cafe-app."""
+    ascii_name = (unicodedata.normalize("NFKD", name)
+                  .encode("ascii", "ignore").decode())
+    return _SLUG_RE.sub("-", ascii_name.lower()).strip("-")
 
 
 _DOC_PORTAL_RE = re.compile(r"^/run/user/\d+/doc/([^/]+)/")
@@ -852,14 +863,43 @@ class Window(Adw.ApplicationWindow):
                             valign=Gtk.Align.CENTER,
                             tooltip_text="Browse…")
         browse.add_css_class("flat")
-        browse.connect("clicked", lambda *_: self._choose_location(loc_row))
         loc_row.add_suffix(browse)
         group.add(name_row)
         group.add(loc_row)
 
+        # The name doubles as the folder to create inside the chosen location,
+        # kept in sync as you type so the field always shows where you'll land.
+        # `base` is the location without that folder; a manual edit of the field
+        # wins and stops us rewriting it.
+        state = {"base": self._last_location, "editing": False, "touched": False}
+
+        def sync_location(*_):
+            if state["touched"]:
+                return
+            slug = slugify(name_row.get_text())
+            state["editing"] = True
+            loc_row.set_text(os.path.join(state["base"], slug) if slug
+                             else state["base"])
+            state["editing"] = False
+
+        def on_location_edited(*_):
+            if not state["editing"]:
+                state["touched"] = True
+
+        def on_location_picked(path):
+            state["base"] = path        # you picked the parent; re-append
+            state["touched"] = False
+            sync_location()
+
+        name_row.connect("notify::text", sync_location)
+        loc_row.connect("notify::text", on_location_edited)
+        browse.connect("clicked", lambda *_: self._choose_location(
+            loc_row.get_text(), on_location_picked))
+
         dialog = Adw.AlertDialog(
             heading="New session",
-            body="The location is created if it doesn't exist yet.",
+            body="The name becomes a folder inside the location. "
+                 "Anything missing is created.",
         )
         dialog.set_extra_child(group)
         dialog.add_response("cancel", "Cancel")
@@ -882,18 +922,18 @@ class Window(Adw.ApplicationWindow):
         dialog.present(self)
         name_row.grab_focus()
 
-    def _choose_location(self, loc_row):
+    def _choose_location(self, current, on_picked):
         chooser = Gtk.FileDialog(title="Choose a location", modal=True)
-        start = os.path.expanduser(loc_row.get_text().strip() or "~")
+        start = os.path.expanduser(current.strip() or "~")
         # Open at the nearest existing ancestor, so browsing still works while a
         # not-yet-created path sits in the field. Ask the host: project dirs
         # aren't visible in here (we mount only ~/.claude).
         while start != "/" and not host_isdir(start):
             start = os.path.dirname(start)
         chooser.set_initial_folder(Gio.File.new_for_path(start))
-        chooser.select_folder(self, None, self._on_location_chosen, loc_row)
+        chooser.select_folder(self, None, self._on_location_chosen, on_picked)
 
-    def _on_location_chosen(self, chooser, result, loc_row):
+    def _on_location_chosen(self, chooser, result, on_picked):
         try:
             folder = chooser.select_folder_finish(result)
         except GLib.Error:
@@ -904,15 +944,13 @@ class Window(Adw.ApplicationWindow):
         path = host_path(path)
         if _DOC_PORTAL_RE.match(path + "/"):
             # Couldn't be resolved to a real path, so it's no use to the host
-            # terminal. Leave the field alone rather than point it at a mount
-            # that will vanish. (The toast sits behind the open dialog, so say
-            # it in the field's place too.)
+            # terminal. Keep whatever's in the field rather than point it at a
+            # mount that will vanish.
             print(f"could not resolve portal path: {path}", file=sys.stderr)
-            loc_row.set_text("")
             self.toast.add_toast(
                 Adw.Toast(title="Couldn't resolve that folder — type the path"))
             return
-        loc_row.set_text(path)
+        on_picked(path)
 
     def _on_new_session_response(self, _dialog, response, name_row, loc_row):
         if response == "start":
@@ -943,7 +981,12 @@ class Window(Adw.ApplicationWindow):
             self.toast.add_toast(
                 Adw.Toast(title="No supported terminal emulator found"))
             return
-        self._last_location = cwd
+        # Reopen at the parent when the folder came from the name, so the next
+        # new session lands beside this one instead of nested inside it.
+        slug = slugify(name)
+        self._last_location = (os.path.dirname(cwd)
+                               if slug and os.path.basename(cwd) == slug
+                               else cwd)
         opened = "Created and started in" if created else "Starting in"
         self.toast.add_toast(Adw.Toast(title=f"{opened} {cwd} ({term})"))
 

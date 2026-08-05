@@ -72,12 +72,17 @@ via `flatpak documents` on the host.
   one), then searched as if spelled correctly. So `sesion` and `cluade` find
   what `session` and `claude` find. Correctly spelled queries are unaffected —
   the typo pass only ever runs for a term that was about to match nothing.
-- **New session** — the *+* button (or <kbd>Ctrl</kbd>+<kbd>N</kbd>) asks for an
-  optional name and a location, then runs `claude --name <name>` there. The
-  location can be typed or browsed for, and is created (with parents) if it
-  doesn't exist yet, so you can start a project and its first session in one
-  step. The name is Claude Code's own `--name`, so it shows up in the prompt box
-  and the `/resume` picker too. The dialog reopens at the last location you used.
+- **New session** — the *+* button (or <kbd>Ctrl</kbd>+<kbd>N</kbd>) asks for a
+  name and a location, then runs `claude --name <name>` there. The name doubles
+  as the folder to create: typing *“Partner Dashboard”* with `~/dev` as the
+  location gives `~/dev/partner-dashboard`, kept in sync in the field as you
+  type, so you always see where you'll land. Editing the location by hand stops
+  that and leaves whatever you typed alone; browsing for a folder sets a new
+  parent and re-appends. Anything missing is created (with parents), so a project
+  and its first session start in one step, and the dialog reopens at the parent
+  so the next session lands beside the last rather than inside it. The name is
+  Claude Code's own `--name`, so it shows up in the prompt box and the `/resume`
+  picker too.
 - **Resume** — clicking *Resume* (or a row) opens your default terminal in the
   session's working directory and runs `claude --resume <session-id>`. The
   shell stays open after Claude exits.
