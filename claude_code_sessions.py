@@ -2,7 +2,8 @@
 """Claude Code Sessions — a small libadwaita/GTK4 dashboard.
 
 Lists every Claude Code session found under ~/.claude/projects (newest first),
-shows its working directory, and lets you resume it in a terminal.
+shows its working directory, and lets you resume it in a terminal — or start a
+new named session in any directory.
 """
 
 import json
@@ -10,6 +11,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -337,6 +339,86 @@ def host_env(var):
     return os.environ.get(var)
 
 
+def host_isdir(path):
+    """Does `path` exist as a directory where the terminal will be launched?
+
+    Always ask the host when sandboxed: we only mount ~/.claude, so a project
+    directory reads as missing from in here even when it is really there.
+    """
+    if in_flatpak():
+        try:
+            r = subprocess.run(
+                ["flatpak-spawn", "--host", "sh", "-c",
+                 f"test -d {shlq(path)}"],
+                capture_output=True, timeout=5)
+            return r.returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+    return os.path.isdir(path)
+
+
+def host_mkdir(path):
+    """Create `path` and any missing parents on the host.
+
+    Returns None on success, else a message. Done host-side for the same reason
+    as host_isdir: the sandbox can't write outside ~/.claude, but the host
+    process we're allowed to spawn can.
+    """
+    if in_flatpak():
+        try:
+            r = subprocess.run(
+                ["flatpak-spawn", "--host", "mkdir", "-p", str(path)],
+                capture_output=True, text=True, timeout=10)
+            if r.returncode == 0:
+                return None
+            return r.stderr.strip().split(": ")[-1] or "mkdir failed"
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return str(exc)
+    try:
+        os.makedirs(path, exist_ok=True)
+    except OSError as exc:
+        return exc.strerror or str(exc)
+    return None
+
+
+_DOC_PORTAL_RE = re.compile(r"^/run/user/\d+/doc/([^/]+)/")
+
+
+def host_path(path):
+    """Translate a document-portal path back to the real path on the host.
+
+    The file chooser doesn't hand a sandboxed app the directory you picked: it
+    exports it through the Documents portal and returns a
+    /run/user/UID/doc/DOCID/name mount instead, which is meaningless to the
+    terminal we spawn on the host — and granting --filesystem doesn't stop it.
+    Only the host can resolve it back: the portal's own Info method answers
+    "Not allowed in sandbox", so ask the flatpak CLI out there instead.
+    """
+    m = _DOC_PORTAL_RE.match(path.rstrip("/") + "/")
+    if not m or not in_flatpak():
+        return path
+    doc_id = m.group(1)
+    try:
+        r = subprocess.run(
+            ["flatpak-spawn", "--host", "flatpak", "documents",
+             "--columns=id,origin"],
+            capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return path
+    if r.returncode != 0:
+        return path
+    for line in r.stdout.splitlines():
+        row = line.split("\t")
+        if len(row) == 2 and row[0].strip() == doc_id:
+            real = row[1].strip()
+            if not real:
+                break
+            # Anything below the exported entry itself carries over unchanged.
+            tail = path.rstrip("/").split("/")[7:]
+            return os.path.join(real, *tail) if tail else real
+    return path
+
+
 def claude_bin():
     # On the host (incl. via flatpak-spawn) a login shell's PATH resolves it.
     if in_flatpak():
@@ -362,27 +444,19 @@ KNOWN_TERMINALS = [
 ]
 
 
-def open_resume_terminal(session):
-    """Open the user's default terminal in the session's cwd, resuming it.
+def open_terminal(cwd, claude_args):
+    """Open the user's default terminal in `cwd` running `claude claude_args`.
 
     Resolution order:
       1. $TERMINAL              (explicit user override)
       2. xdg-terminal-exec      (the freedesktop default-terminal standard)
       3. first installed terminal we know how to drive (ghostty, ptyxis, …)
     """
-    # The session's working directory. Don't validate it with os.path.isdir()
-    # when sandboxed: the Flatpak only mounts ~/.claude, so project dirs read as
-    # missing and we'd fall back to $HOME — where `claude --resume` can't find
-    # the session. The dir exists on the host, so trust it and let the host
-    # shell fall back if it's genuinely gone.
-    cwd = session.cwd
-    if not in_flatpak() and not os.path.isdir(cwd):
-        cwd = os.path.expanduser("~")
     # Login shell so PATH/nvm/etc. are set up. cd explicitly (a flatpak-spawned
     # host process starts in $HOME, not our cwd), then drop to an interactive
     # shell once Claude exits so the window stays open.
-    resume = f"{shlq(claude_bin())} --resume {shlq(session.session_id)}"
-    shell_cmd = f"cd {shlq(cwd)} 2>/dev/null || cd; {resume}; exec $SHELL"
+    claude = " ".join([shlq(claude_bin()), *(shlq(a) for a in claude_args)])
+    shell_cmd = f"cd {shlq(cwd)} 2>/dev/null || cd; {claude}; exec $SHELL"
     run_cmd = ["bash", "-lc", shell_cmd]
 
     candidates = []
@@ -412,6 +486,29 @@ def open_resume_terminal(session):
         except OSError:
             continue
     return False, None
+
+
+def open_resume_terminal(session):
+    """Resume an existing session in a terminal."""
+    # Don't validate the session's cwd with os.path.isdir() when sandboxed: the
+    # Flatpak only mounts ~/.claude, so project dirs read as missing and we'd
+    # fall back to $HOME — where `claude --resume` can't find the session. The
+    # dir exists on the host, so trust it and let the host shell fall back if
+    # it's genuinely gone.
+    cwd = session.cwd
+    if not in_flatpak() and not os.path.isdir(cwd):
+        cwd = os.path.expanduser("~")
+    return open_terminal(cwd, ["--resume", session.session_id])
+
+
+def open_new_terminal(cwd, name):
+    """Start a fresh session in `cwd`, optionally with a display name.
+
+    `--name` is Claude Code's own flag for this, so the name shows up in the
+    prompt box and the /resume picker, and lands in the session file as the same
+    custom title `/rename` writes — which is what this app reads back.
+    """
+    return open_terminal(cwd, ["--name", name] if name else [])
 
 
 def shlq(s):
@@ -517,12 +614,20 @@ class Window(Adw.ApplicationWindow):
         self._monitors = []
         self._monitored = set()
         self._rescan_pending = False
+        # Where the New session dialog starts from; follows the last one you
+        # opened so a second session in the same project is a single click.
+        self._last_location = str(Path.home())
 
         toolbar = Adw.ToolbarView()
         self.set_content(toolbar)
 
         header = Adw.HeaderBar()
         toolbar.add_top_bar(header)
+
+        new = Gtk.Button(icon_name="list-add-symbolic")
+        new.set_tooltip_text("New session (Ctrl+N)")
+        new.connect("clicked", lambda *_: self.new_session())
+        header.pack_start(new)
 
         refresh = Gtk.Button(icon_name="view-refresh-symbolic")
         refresh.set_tooltip_text("Rescan sessions")
@@ -737,6 +842,111 @@ class Window(Adw.ApplicationWindow):
         self.all_header.set_visible(fav and others)
         self.all_listbox.set_visible(others)
 
+    # -- New session --------------------------------------------------------- #
+    def new_session(self):
+        """Ask for a name and a directory, then start Claude Code there."""
+        group = Adw.PreferencesGroup()
+        name_row = Adw.EntryRow(title="Name (optional)")
+        loc_row = Adw.EntryRow(title="Location", text=self._last_location)
+        browse = Gtk.Button(icon_name="folder-open-symbolic",
+                            valign=Gtk.Align.CENTER,
+                            tooltip_text="Browse…")
+        browse.add_css_class("flat")
+        browse.connect("clicked", lambda *_: self._choose_location(loc_row))
+        loc_row.add_suffix(browse)
+        group.add(name_row)
+        group.add(loc_row)
+
+        dialog = Adw.AlertDialog(
+            heading="New session",
+            body="The location is created if it doesn't exist yet.",
+        )
+        dialog.set_extra_child(group)
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("start", "Start")
+        dialog.set_response_appearance("start",
+                                       Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("start")
+        dialog.set_close_response("cancel")
+
+        def submit(*_):
+            # Enter in either field is "Start" (an EntryRow eats the keypress,
+            # so the dialog's default response never sees it).
+            dialog.close()
+            self._start_new_session(name_row.get_text(), loc_row.get_text())
+
+        name_row.connect("entry-activated", submit)
+        loc_row.connect("entry-activated", submit)
+        dialog.connect("response", self._on_new_session_response,
+                       name_row, loc_row)
+        dialog.present(self)
+        name_row.grab_focus()
+
+    def _choose_location(self, loc_row):
+        chooser = Gtk.FileDialog(title="Choose a location", modal=True)
+        start = os.path.expanduser(loc_row.get_text().strip() or "~")
+        # Open at the nearest existing ancestor, so browsing still works while a
+        # not-yet-created path sits in the field. Ask the host: project dirs
+        # aren't visible in here (we mount only ~/.claude).
+        while start != "/" and not host_isdir(start):
+            start = os.path.dirname(start)
+        chooser.set_initial_folder(Gio.File.new_for_path(start))
+        chooser.select_folder(self, None, self._on_location_chosen, loc_row)
+
+    def _on_location_chosen(self, chooser, result, loc_row):
+        try:
+            folder = chooser.select_folder_finish(result)
+        except GLib.Error:
+            return                      # dismissed
+        path = folder.get_path()
+        if not path:
+            return
+        path = host_path(path)
+        if _DOC_PORTAL_RE.match(path + "/"):
+            # Couldn't be resolved to a real path, so it's no use to the host
+            # terminal. Leave the field alone rather than point it at a mount
+            # that will vanish. (The toast sits behind the open dialog, so say
+            # it in the field's place too.)
+            print(f"could not resolve portal path: {path}", file=sys.stderr)
+            loc_row.set_text("")
+            self.toast.add_toast(
+                Adw.Toast(title="Couldn't resolve that folder — type the path"))
+            return
+        loc_row.set_text(path)
+
+    def _on_new_session_response(self, _dialog, response, name_row, loc_row):
+        if response == "start":
+            self._start_new_session(name_row.get_text(), loc_row.get_text())
+
+    def _start_new_session(self, name, location):
+        name = name.strip()
+        location = location.strip()
+        if not location:
+            self.toast.add_toast(Adw.Toast(title="Choose a location first"))
+            return
+        cwd = os.path.normpath(os.path.expanduser(location))
+        if not os.path.isabs(cwd):
+            self.toast.add_toast(
+                Adw.Toast(title=f"“{location}” isn't an absolute path"))
+            return
+
+        created = not host_isdir(cwd)
+        if created:
+            err = host_mkdir(cwd)
+            if err:
+                self.toast.add_toast(
+                    Adw.Toast(title=f"Couldn't create {cwd}: {err}"))
+                return
+
+        ok, term = open_new_terminal(cwd, name)
+        if not ok:
+            self.toast.add_toast(
+                Adw.Toast(title="No supported terminal emulator found"))
+            return
+        self._last_location = cwd
+        opened = "Created and started in" if created else "Starting in"
+        self.toast.add_toast(Adw.Toast(title=f"{opened} {cwd} ({term})"))
+
     def _confirm_rename(self, row):
         entry = Gtk.Entry(text=row.session.title, activates_default=True,
                           hexpand=True)
@@ -831,6 +1041,18 @@ class App(Adw.Application):
     def __init__(self):
         super().__init__(application_id=APP_ID,
                          flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
+
+    def do_startup(self):
+        Adw.Application.do_startup(self)
+        action = Gio.SimpleAction.new("new-session", None)
+        action.connect("activate", self._on_new_session_action)
+        self.add_action(action)
+        self.set_accels_for_action("app.new-session", ["<Primary>n"])
+
+    def _on_new_session_action(self, *_):
+        win = self.props.active_window
+        if win is not None:
+            win.new_session()
 
     def do_activate(self):
         win = self.props.active_window or Window(self)

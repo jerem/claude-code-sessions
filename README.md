@@ -3,7 +3,7 @@
 A small libadwaita/GTK4 dashboard that lists every Claude Code session found
 under `~/.claude/projects`, newest first, showing each session's title and
 working directory — and lets you resume any of them in a terminal with one
-click.
+click, or start a new named session in any directory.
 
 ![GTK4 / libadwaita]
 
@@ -37,15 +37,25 @@ flatpak run io.github.jerem.ClaudeCodeSessions
 The sandbox is intentionally narrow:
 
 - `--filesystem=~/.claude` — read the session logs, and append a `custom-title`
-  entry when you rename a session. No access outside `~/.claude` is granted.
+  entry when you rename a session. No access outside `~/.claude` is granted, not
+  even read-only.
 - `--talk-name=org.freedesktop.Flatpak` — the only way to reach the host. The
   app shells out via `flatpak-spawn --host` to launch your terminal, run
-  `claude --resume`, and `gio trash` deleted sessions — none of which exist
-  inside the sandbox.
+  `claude`, `mkdir -p` a new session's location, and `gio trash` deleted
+  sessions — none of which exist inside the sandbox.
 
-It never needs broad home access: resumed terminals open as host processes, so
-they already see your real files. Starred sessions are stored in the app's own
-config directory, not in `~/.claude`.
+It never needs broad home access: terminals open as host processes, so they
+already see your real files, and a new session's directory is created out there
+too. Starred sessions are stored in the app's own config directory, not in
+`~/.claude`.
+
+One wrinkle worth knowing about: the file chooser portal doesn't hand a
+sandboxed app the folder you picked. It exports it through the Documents portal
+and returns a `/run/user/UID/doc/DOCID/name` mount instead — a path that means
+nothing to the terminal being launched, and granting `--filesystem` doesn't
+change that. The portal's own `Info` method refuses to answer inside the sandbox
+("Not allowed in sandbox"), so `host_path()` resolves the id back to a real path
+via `flatpak documents` on the host.
 
 ## How it works
 

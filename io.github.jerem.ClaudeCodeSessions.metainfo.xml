@@ -19,9 +19,11 @@
     </p>
     <p>Features:</p>
     <ul>
-      <li>Search across session titles, working directories, and conversation content</li>
+      <li>Search across session titles, working directories, and conversation content, forgiving typos</li>
       <li>Resume any session in your default terminal with one click</li>
-      <li>Delete sessions you no longer need (moved to the trash)</li>
+      <li>Start a new named session in any directory, creating it if needed</li>
+      <li>Star sessions to keep them in a Favorites section</li>
+      <li>Rename sessions, or delete ones you no longer need (moved to the trash)</li>
     </ul>
   </description>
 
