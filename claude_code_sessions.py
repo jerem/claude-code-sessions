@@ -7,6 +7,7 @@ shows its working directory, and lets you resume it in a terminal.
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -28,10 +29,103 @@ STAR_PATH = (Path(GLib.get_user_config_dir())
 
 
 # --------------------------------------------------------------------------- #
+# Search
+# --------------------------------------------------------------------------- #
+_WORD_RE = re.compile(r"[a-z0-9_]+")
+
+
+def _typo_budget(term):
+    """How many typos to forgive in a term. Short terms get none: at three
+    characters, one edit reaches half the dictionary."""
+    if len(term) < 4:
+        return 0
+    return 1 if len(term) < 8 else 2
+
+
+def _near(term, word, budget):
+    """True if `term` is within `budget` Damerau-Levenshtein edits of `word`.
+
+    Banded DP: an alignment that strays more than `budget` cells off the
+    diagonal has already spent more than the budget, so each row costs
+    O(budget) instead of O(len(word)). The transposition case (the `prev2`
+    row) is what lets "cluade" reach "claude" in a single edit — plain
+    Levenshtein scores swapped letters as two.
+    """
+    n, m = len(term), len(word)
+    if abs(n - m) > budget:
+        return False
+    over = budget + 1                      # any value at/above this is a reject
+    prev2 = None
+    prev = list(range(m + 1))              # edits from "" to each word prefix
+    for i in range(1, n + 1):
+        lo, hi = max(1, i - budget), min(m, i + budget)
+        cur = [over] * (m + 1)
+        if lo == 1:
+            cur[0] = i
+        c = term[i - 1]
+        row_best = over
+        for j in range(lo, hi + 1):
+            cost = min(prev[j] + 1,                        # delete
+                       cur[j - 1] + 1,                     # insert
+                       prev[j - 1] + (c != word[j - 1]))   # keep / substitute
+            if (i > 1 and j > 1
+                    and c == word[j - 2] and term[i - 2] == word[j - 1]):
+                cost = min(cost, prev2[j - 2] + 1)         # transpose
+            cur[j] = cost
+            if cost < row_best:
+                row_best = cost
+        if row_best > budget:
+            return False                   # every alignment is already over
+        prev2, prev = prev, cur
+    return prev[m] <= budget
+
+
+class Query:
+    """The search box's text, matched against sessions.
+
+    Every whitespace-separated term has to hit (AND), and a term hits when it
+    appears verbatim anywhere in a session's blob — title, directory, id or
+    conversation. A term that hits *nothing* verbatim is taken to be a typo and
+    corrected to the near-spelled words the sessions actually contain, and then
+    searched as if you had spelled it right — "sesion" or "flatpk" find exactly
+    what "session" and "flatpak" would, instead of coming up empty.
+
+    Correctly spelled queries therefore behave exactly as before: the typo
+    pass only ever adds results to a search that was about to return none.
+    """
+
+    def __init__(self, text, sessions):
+        self.terms = text.lower().split()
+        self.near = {}          # typo'd term -> corrected spellings to accept
+        missing = [t for t in self.terms
+                   if not any(t in s.search_blob for s in sessions)]
+        if missing and sessions:
+            vocab = frozenset().union(*(s.tokens for s in sessions))
+            for term in missing:
+                budget = _typo_budget(term)
+                if not budget:
+                    continue
+                near = frozenset(w for w in vocab if _near(term, w, budget))
+                if near:
+                    self.near[term] = near
+
+    def keeps(self, session):
+        for term in self.terms:
+            if term in session.search_blob:
+                continue
+            near = self.near.get(term)
+            if near and any(w in session.search_blob for w in near):
+                continue
+            return False
+        return True
+
+
+# --------------------------------------------------------------------------- #
 # Data
 # --------------------------------------------------------------------------- #
 class Session:
-    __slots__ = ("session_id", "cwd", "title", "mtime", "path", "search_blob")
+    __slots__ = ("session_id", "cwd", "title", "mtime", "path", "search_blob",
+                 "tokens")
 
     def __init__(self, session_id, cwd, title, mtime, path, search_blob):
         self.session_id = session_id
@@ -41,10 +135,9 @@ class Session:
         self.path = path
         # Lowercased haystack: title + dir + id + the user-side conversation.
         self.search_blob = search_blob
-
-    def matches(self, terms):
-        """All whitespace-separated terms must appear somewhere (AND, any field)."""
-        return all(t in self.search_blob for t in terms)
+        # The same text as distinct words: the vocabulary a typo'd term is
+        # corrected against.
+        self.tokens = frozenset(_WORD_RE.findall(search_blob))
 
 
 def _first_text(content):
@@ -408,6 +501,8 @@ class SessionRow(Adw.ActionRow):
     def apply_new_title(self, new_title):
         self.session.title = new_title
         self.session.search_blob += " " + new_title.lower()
+        self.session.tokens = frozenset(
+            _WORD_RE.findall(self.session.search_blob))
         self._refresh_title()
 
 
@@ -619,9 +714,14 @@ class Window(Adw.ApplicationWindow):
         self._update_sections()
 
     def _filter(self):
-        terms = self.search.get_text().lower().split()
-        for row in self.all_rows:
-            row.set_visible(not terms or row.session.matches(terms))
+        text = self.search.get_text()
+        if not text.split():
+            for row in self.all_rows:
+                row.set_visible(True)
+        else:
+            query = Query(text, [r.session for r in self.all_rows])
+            for row in self.all_rows:
+                row.set_visible(query.keeps(row.session))
         self._update_sections()
 
     def _update_sections(self):

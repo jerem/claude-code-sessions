@@ -55,7 +55,19 @@ config directory, not in `~/.claude`.
   time, then sorts newest first.
 - **Search** — the box matches every whitespace-separated term (AND) against
   the title, working directory, session id, *and the conversation content*, so
-  you can find a session by something you typed in it.
+  you can find a session by something you typed in it. A term that matches
+  nothing verbatim is treated as a typo: it's corrected against the words the
+  sessions actually contain (Damerau-Levenshtein — one edit for terms under 8
+  characters, two beyond, none under 4, and a swapped pair of letters counts as
+  one), then searched as if spelled correctly. So `sesion` and `cluade` find
+  what `session` and `claude` find. Correctly spelled queries are unaffected —
+  the typo pass only ever runs for a term that was about to match nothing.
+- **New session** — the *+* button (or <kbd>Ctrl</kbd>+<kbd>N</kbd>) asks for an
+  optional name and a location, then runs `claude --name <name>` there. The
+  location can be typed or browsed for, and is created (with parents) if it
+  doesn't exist yet, so you can start a project and its first session in one
+  step. The name is Claude Code's own `--name`, so it shows up in the prompt box
+  and the `/resume` picker too. The dialog reopens at the last location you used.
 - **Resume** — clicking *Resume* (or a row) opens your default terminal in the
   session's working directory and runs `claude --resume <session-id>`. The
   shell stays open after Claude exits.
