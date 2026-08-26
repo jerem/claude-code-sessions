@@ -62,7 +62,16 @@ via `flatpak documents` on the host.
 - **Discovery** — scans `~/.claude/projects/*/*.jsonl`. Each `.jsonl` is one
   session. For each, it reads the working directory (`cwd`), the AI-generated
   title (falling back to the first user prompt), and the file's modification
-  time, then sorts newest first.
+  time, then sorts newest first. Lines are read as bytes and substring-tested
+  before being parsed, so the big assistant payloads are never decoded.
+- **The index** — logs get large (a long session can reach hundreds of
+  megabytes), and re-reading them all on every scan does not scale. Parsed state
+  is cached per file in `$XDG_CACHE_HOME/claude-code-sessions/index.json`,
+  including the byte offset parsing stopped at. Session logs are append-only, so
+  an unchanged file costs a `stat()` and a grown one costs only its new bytes —
+  a file that gained 2 KB is 2 KB of reading, not 350 MB. A file that shrank was
+  rewritten rather than appended to, so it is parsed again from the top. Only
+  the first scan pays full price; delete the file to force one.
 - **Search** — the box matches every whitespace-separated term (AND) against
   the title, working directory, session id, *and the conversation content*, so
   you can find a session by something you typed in it. A term that matches
@@ -97,8 +106,10 @@ via `flatpak documents` on the host.
 - **Live updates** — a `Gio.FileMonitor` on `~/.claude/projects` watches for
   changes (debounced ~800 ms). New sessions, renames, deletions, and activity
   bumps are reconciled *in place* — only the affected rows change, so your
-  scroll position and search text are preserved. The manual refresh button
-  forces an immediate re-scan.
+  scroll position and search text are preserved. This fires on every write to
+  the session you are sitting in, which is what makes the index matter: a
+  rescan re-reads only what actually changed. The manual refresh button forces
+  an immediate re-scan.
 
 ### Which terminal opens
 

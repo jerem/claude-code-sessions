@@ -29,6 +29,9 @@ APP_ID = "io.github.jerem.ClaudeCodeSessions"
 # ~/.var/app/<id>/config inside it — writable in both cases.
 STAR_PATH = (Path(GLib.get_user_config_dir())
              / "claude-code-sessions" / "starred.json")
+# Parsed-session cache. Regenerable, so it lives in the cache dir.
+INDEX_PATH = (Path(GLib.get_user_cache_dir())
+              / "claude-code-sessions" / "index.json")
 
 
 # --------------------------------------------------------------------------- #
@@ -128,7 +131,7 @@ class Query:
 # --------------------------------------------------------------------------- #
 class Session:
     __slots__ = ("session_id", "cwd", "title", "mtime", "path", "search_blob",
-                 "tokens")
+                 "_tokens")
 
     def __init__(self, session_id, cwd, title, mtime, path, search_blob):
         self.session_id = session_id
@@ -138,9 +141,16 @@ class Session:
         self.path = path
         # Lowercased haystack: title + dir + id + the user-side conversation.
         self.search_blob = search_blob
-        # The same text as distinct words: the vocabulary a typo'd term is
-        # corrected against.
-        self.tokens = frozenset(_WORD_RE.findall(search_blob))
+        self._tokens = None
+
+    @property
+    def tokens(self):
+        """The blob as distinct words: the vocabulary a typo'd term is corrected
+        against. Built on first use — only a misspelled search needs it, and
+        splitting every blob on every rescan is not free."""
+        if self._tokens is None:
+            self._tokens = frozenset(_WORD_RE.findall(self.search_blob))
+        return self._tokens
 
 
 def _first_text(content):
@@ -153,91 +163,189 @@ def _first_text(content):
     return None
 
 
-def parse_session(path):
-    """Pull just the fields we need out of a session .jsonl, cheaply.
+PROMPT_CAP = 200_000   # index the whole conversation; just bound runaway logs
 
-    We substring-test each line before json-parsing it, so we never decode the
-    big assistant payloads — only the handful of lines that carry metadata.
-    """
-    cwd = None
-    last_cwd_line = None  # the most recent line carrying a cwd
-    title = None          # AI-generated title ("ai-title")
-    custom_title = None   # user-set name via /rename ("custom-title")
-    first_prompt = None
-    prompts = []          # the user-side text, for content search
-    prompt_chars = 0
-    PROMPT_CAP = 200_000  # index the whole conversation; just bound runaway logs
+
+def _json_get(raw, key):
+    """Read one key out of a JSONL line, or None if the line won't parse."""
     try:
-        with open(path, "r", errors="replace") as fh:
-            for line in fh:
-                # Keep the *last* cwd: `/cd` changes it mid-session, and the
-                # session file moves to the new project dir, so the current cwd
-                # is what `claude --resume` needs (parse just this one line).
-                if '"cwd"' in line:
-                    last_cwd_line = line
-                if '"aiTitle"' in line:
-                    try:
-                        title = json.loads(line).get("aiTitle") or title
-                    except json.JSONDecodeError:
-                        pass
-                if '"customTitle"' in line:
-                    try:
-                        custom_title = (json.loads(line).get("customTitle")
-                                        or custom_title)
-                    except json.JSONDecodeError:
-                        pass
-                if (prompt_chars < PROMPT_CAP
-                        and '"type":"user"' in line.replace(" ", "")):
-                    try:
-                        msg = json.loads(line).get("message", {})
-                        txt = _first_text(msg.get("content"))
-                    except json.JSONDecodeError:
-                        txt = None
-                    # Skip tool results / injected context (they start with '<').
-                    if txt and not txt.lstrip().startswith("<"):
-                        txt = txt.strip()
-                        if first_prompt is None:
-                            first_prompt = txt
-                        prompts.append(txt)
-                        prompt_chars += len(txt)
+        value = json.loads(raw)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    return value.get(key) if isinstance(value, dict) else None
+
+
+def _user_text(raw):
+    """The user-typed text of a user line, or None if it isn't one."""
+    msg = _json_get(raw, "message")
+    txt = _first_text(msg.get("content")) if isinstance(msg, dict) else None
+    if not txt:
+        return None
+    txt = txt.strip()
+    # Skip tool results / injected context (they start with '<').
+    return txt if txt and not txt.startswith("<") else None
+
+
+def _blank_state():
+    return {"offset": 0, "cwd": None, "ai_title": None, "custom_title": None,
+            "first_prompt": None, "prompts": "", "prompt_chars": 0}
+
+
+def _read_into(path, state):
+    """Fold the not-yet-read lines of `path` into `state`.
+
+    Read as bytes and substring-test each line before parsing it, so the big
+    assistant payloads are never decoded — only the handful of lines carrying
+    metadata. Parsing resumes at the offset the last pass stopped on, which is
+    what keeps a 350 MB log that just gained a few KB costing a few KB.
+    """
+    last_cwd_line = None
+    fresh = []
+    with open(path, "rb") as fh:
+        fh.seek(state["offset"])
+        for raw in fh:
+            if not raw.endswith(b"\n"):
+                break          # half-written line; pick it up on the next pass
+            state["offset"] += len(raw)
+            # Keep the *last* cwd: `/cd` changes it mid-session, and the session
+            # file moves to the new project dir, so the current cwd is what
+            # `claude --resume` needs (parse just this one line, at the end).
+            if b'"cwd"' in raw:
+                last_cwd_line = raw
+            if b'"aiTitle"' in raw:
+                state["ai_title"] = _json_get(raw, "aiTitle") or state["ai_title"]
+            if b'"customTitle"' in raw:
+                state["custom_title"] = (_json_get(raw, "customTitle")
+                                         or state["custom_title"])
+            if (state["prompt_chars"] < PROMPT_CAP
+                    and (b'"type":"user"' in raw or b'"type": "user"' in raw)):
+                txt = _user_text(raw)
+                if txt:
+                    if state["first_prompt"] is None:
+                        state["first_prompt"] = txt
+                    fresh.append(txt)
+                    state["prompt_chars"] += len(txt)
+    if last_cwd_line is not None:
+        state["cwd"] = _json_get(last_cwd_line, "cwd") or state["cwd"]
+    if fresh:
+        state["prompts"] = " ".join(x for x in (state["prompts"], *fresh) if x)
+
+
+def parse_session(path, index=None):
+    """Build a Session from a .jsonl, reusing whatever the index already knows."""
+    try:
+        st = path.stat()
     except OSError:
         return None
-
-    if last_cwd_line is not None:
+    state = index.resume(path, st) if index is not None else None
+    if state is None:
+        state = _blank_state()
+    if state["offset"] < st.st_size:
         try:
-            cwd = json.loads(last_cwd_line).get("cwd") or cwd
-        except json.JSONDecodeError:
-            pass
+            _read_into(path, state)
+        except OSError:
+            return None
+    if index is not None:
+        index.store(path, st, state)
+
+    cwd = state["cwd"]
     if cwd is None:
         # Fall back to decoding the directory name (slashes were turned to '-').
         cwd = "/" + path.parent.name.lstrip("-").replace("-", "/")
 
     # A user's /rename (custom-title) wins over the auto-generated ai-title.
-    display_title = custom_title or title or first_prompt or "(untitled session)"
+    display_title = (state["custom_title"] or state["ai_title"]
+                     or state["first_prompt"] or "(untitled session)")
     if len(display_title) > 90:
         display_title = display_title[:89] + "…"
 
-    blob = " ".join([custom_title or "", title or "", cwd, path.stem,
-                     " ".join(prompts)]).lower()
+    blob = " ".join([state["custom_title"] or "", state["ai_title"] or "",
+                     cwd, path.stem, state["prompts"]]).lower()
 
     return Session(
         session_id=path.stem,
         cwd=cwd,
         title=display_title,
-        mtime=path.stat().st_mtime,
+        mtime=st.st_mtime,
         path=str(path),
         search_blob=blob,
     )
 
 
-def scan_sessions():
+class Index:
+    """Cache of parsed session state, keyed by file path.
+
+    Rescans are frequent — the file monitor fires on every write to the session
+    you are sitting in — and re-reading every log each time got expensive once
+    they grew to hundreds of megabytes. Session logs only ever grow, so each
+    entry keeps the byte offset parsing stopped at: an unchanged file then costs
+    a stat(), and a grown one costs only its new bytes. It survives restarts, so
+    a cold start after the first is a stat() per file too.
+    """
+
+    VERSION = 1
+
+    def __init__(self):
+        self.entries = {}
+        self._dirty = False
+        self._saved_at = 0.0
+        try:
+            data = json.loads(INDEX_PATH.read_text())
+            if data.get("version") == self.VERSION:
+                self.entries = data.get("entries") or {}
+        except (OSError, ValueError):
+            pass
+
+    def resume(self, path, st):
+        """The state to carry on from, or None to parse `path` from scratch."""
+        entry = self.entries.get(str(path))
+        if entry is None or st.st_size < entry.get("offset", 0):
+            return None     # unknown, or rewritten shorter: our offset is a lie
+        return entry
+
+    def store(self, path, st, state):
+        state["size"] = st.st_size
+        state["mtime"] = st.st_mtime
+        self.entries[str(path)] = state
+        self._dirty = True
+
+    def forget_missing(self, seen):
+        if len(seen) != len(self.entries):
+            self.entries = {p: e for p, e in self.entries.items() if p in seen}
+            self._dirty = True
+
+    def save(self, force=False):
+        """Persist the index. Throttled: writing it on every rescan during an
+        active session would hand back the time the index just saved."""
+        if not self._dirty:
+            return
+        if not force and time.monotonic() - self._saved_at < 60:
+            return
+        try:
+            INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
+            tmp = INDEX_PATH.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"version": self.VERSION,
+                                       "entries": self.entries}))
+            tmp.replace(INDEX_PATH)      # atomic swap
+        except (OSError, ValueError):
+            return
+        self._dirty = False
+        self._saved_at = time.monotonic()
+
+
+def scan_sessions(index=None):
     sessions = []
+    seen = set()
     if not PROJECTS_DIR.is_dir():
         return sessions
     for jsonl in PROJECTS_DIR.glob("*/*.jsonl"):
-        s = parse_session(jsonl)
+        seen.add(str(jsonl))
+        s = parse_session(jsonl, index)
         if s is not None:
             sessions.append(s)
+    if index is not None:
+        index.forget_missing(seen)
+        index.save()
     sessions.sort(key=lambda s: s.mtime, reverse=True)
     return sessions
 
@@ -609,8 +717,7 @@ class SessionRow(Adw.ActionRow):
     def apply_new_title(self, new_title):
         self.session.title = new_title
         self.session.search_blob += " " + new_title.lower()
-        self.session.tokens = frozenset(
-            _WORD_RE.findall(self.session.search_blob))
+        self.session._tokens = None      # rebuilt on next use
         self._refresh_title()
 
 
@@ -622,6 +729,8 @@ class Window(Adw.ApplicationWindow):
         self.all_rows = []
         self.rows_by_id = {}
         self.stars = Stars()
+        self.index = Index()
+        self._scan_lock = threading.Lock()
         self._monitors = []
         self._monitored = set()
         self._rescan_pending = False
@@ -715,7 +824,9 @@ class Window(Adw.ApplicationWindow):
         threading.Thread(target=self._scan_worker, daemon=True).start()
 
     def _scan_worker(self):
-        sessions = scan_sessions()
+        # One scan at a time: overlapping passes would race on the index.
+        with self._scan_lock:
+            sessions = scan_sessions(self.index)
         GLib.idle_add(self._apply, sessions)
 
     def _apply(self, sessions):
@@ -1084,6 +1195,12 @@ class App(Adw.Application):
     def __init__(self):
         super().__init__(application_id=APP_ID,
                          flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
+
+    def do_shutdown(self):
+        win = self.props.active_window
+        if win is not None:
+            win.index.save(force=True)     # the throttle doesn't apply on exit
+        Adw.Application.do_shutdown(self)
 
     def do_startup(self):
         Adw.Application.do_startup(self)
