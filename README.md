@@ -41,8 +41,8 @@ The sandbox is intentionally narrow:
   even read-only.
 - `--talk-name=org.freedesktop.Flatpak` — the only way to reach the host. The
   app shells out via `flatpak-spawn --host` to launch your terminal, run
-  `claude`, `mkdir -p` a new session's location, and `gio trash` deleted
-  sessions — none of which exist inside the sandbox.
+  `claude`, `mkdir -p` a new session's location, `xdg-open` a project folder,
+  and `gio trash` deleted sessions — none of which exist inside the sandbox.
 
 It never needs broad home access: terminals open as host processes, so they
 already see your real files, and a new session's directory is created out there
@@ -95,6 +95,12 @@ via `flatpak documents` on the host.
 - **Resume** — clicking *Resume* (or a row) opens your default terminal in the
   session's working directory and runs `claude --resume <session-id>`. The
   shell stays open after Claude exits.
+- **Open folder** — *⋮ → Open folder* shows the session's working directory in
+  your file manager. Like everything else that touches a project directory, the
+  launch happens on the host: the sandbox can't see the folder, and the OpenURI
+  portal wants a file descriptor for a directory we have no way to open from in
+  here. Falls back to `gio open` if `xdg-open` isn't installed, and says so if
+  the directory is gone.
 - **Star** — the star toggle moves a session into a **Favorites** section shown
   above the rest (each section ordered most-recent first). Stars persist in the
   app's config directory.

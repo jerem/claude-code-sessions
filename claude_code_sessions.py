@@ -538,6 +538,24 @@ def host_path(path):
     return path
 
 
+def open_folder(path):
+    """Show `path` in the file manager.
+
+    Host-side like everything else that touches a project directory: the
+    sandbox can't see it, and the OpenURI portal wants a file descriptor for a
+    directory we have no way to open from in here.
+    """
+    for argv in (["xdg-open", str(path)], ["gio", "open", str(path)]):
+        if not host_has(argv[0]):
+            continue
+        try:
+            on_host(argv)
+            return True
+        except OSError:
+            continue
+    return False
+
+
 def claude_bin():
     # On the host (incl. via flatpak-spawn) a login shell's PATH resolves it.
     if in_flatpak():
@@ -638,7 +656,7 @@ def shlq(s):
 # UI
 # --------------------------------------------------------------------------- #
 class SessionRow(Adw.ActionRow):
-    def __init__(self, session, stars, on_resume, on_rename, on_delete,
+    def __init__(self, session, stars, on_resume, on_open, on_rename, on_delete,
                  on_star_changed):
         super().__init__()
         self.session = session
@@ -665,7 +683,7 @@ class SessionRow(Adw.ActionRow):
         resume.connect("clicked", lambda *_: on_resume(self.session))
         self.add_suffix(resume)
 
-        # Overflow menu: Rename…, Delete.
+        # Overflow menu: Open folder, Rename…, Delete.
         menu = Gtk.MenuButton(icon_name="view-more-symbolic",
                               valign=Gtk.Align.CENTER)
         menu.add_css_class("flat")
@@ -673,6 +691,7 @@ class SessionRow(Adw.ActionRow):
         popover = Gtk.Popover(has_arrow=False)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         for label, cb, extra in (
+            ("Open folder", lambda: on_open(self.session), None),
             ("Rename…", lambda: on_rename(self), None),
             ("Delete", lambda: on_delete(self), "destructive-action"),
         ):
@@ -848,7 +867,7 @@ class Window(Adw.ApplicationWindow):
         for sid, s in new_by_id.items():
             row = self.rows_by_id.get(sid)
             if row is None:
-                row = SessionRow(s, self.stars, self._resume,
+                row = SessionRow(s, self.stars, self._resume, self._open_folder,
                                  self._confirm_rename, self._confirm_delete,
                                  self._on_star_changed)
                 self.rows_by_id[sid] = row
@@ -1178,6 +1197,16 @@ class Window(Adw.ApplicationWindow):
             self.stack.set_visible_child_name("status")
         else:
             self._update_sections()
+
+    def _open_folder(self, session):
+        if not host_isdir(session.cwd):
+            self.toast.add_toast(
+                Adw.Toast(title=f"{session.cwd} no longer exists"))
+            return
+        if open_folder(session.cwd):
+            self.toast.add_toast(Adw.Toast(title=f"Opening {session.cwd}"))
+        else:
+            self.toast.add_toast(Adw.Toast(title="No file manager found"))
 
     def _resume(self, session):
         ok, term = open_resume_terminal(session)
