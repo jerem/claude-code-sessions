@@ -538,6 +538,31 @@ def host_path(path):
     return path
 
 
+def host_session_env(var):
+    """Read `var` from the host's systemd user environment.
+
+    The desktop session keeps things like SSH_AUTH_SOCK there rather than in
+    profile files, so nothing in our chain sees it. Flatpak does not put it in
+    the sandbox, flatpak-spawn hands the host command our environment where it
+    was never set, and a login shell on the host does not set it either. Ask
+    systemd for the session's own value instead.
+    """
+    argv = ["systemctl", "--user", "show-environment"]
+    if in_flatpak():
+        argv = ["flatpak-spawn", "--host", *argv]
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0:
+        return None
+    prefix = var + "="
+    for line in r.stdout.splitlines():
+        if line.startswith(prefix):
+            return line[len(prefix):].strip() or None
+    return None
+
+
 def open_folder(path):
     """Show `path` in the file manager.
 
@@ -593,7 +618,18 @@ def open_terminal(cwd, claude_args):
     # host process starts in $HOME, not our cwd), then drop to an interactive
     # shell once Claude exits so the window stays open.
     claude = " ".join([shlq(claude_bin()), *(shlq(a) for a in claude_args)])
-    shell_cmd = f"cd {shlq(cwd)} 2>/dev/null || cd; {claude}; exec $SHELL"
+    # Carry the ssh-agent across. Without this, git over SSH in the terminal we
+    # open has no agent, so it prompts for a passphrase or refuses the key.
+    # Export it in the command itself rather than through flatpak-spawn --env:
+    # terminals that run as a single-instance daemon hand our command to an
+    # existing process, and the environment we asked for never arrives.
+    prelude = ""
+    if not os.environ.get("SSH_AUTH_SOCK"):
+        sock = host_session_env("SSH_AUTH_SOCK")
+        if sock:
+            prelude = f"export SSH_AUTH_SOCK={shlq(sock)}; "
+    shell_cmd = (f"{prelude}cd {shlq(cwd)} 2>/dev/null || cd; "
+                 f"{claude}; exec $SHELL")
     run_cmd = ["bash", "-lc", shell_cmd]
 
     candidates = []

@@ -42,7 +42,8 @@ The sandbox is intentionally narrow:
 - `--talk-name=org.freedesktop.Flatpak` — the only way to reach the host. The
   app shells out via `flatpak-spawn --host` to launch your terminal, run
   `claude`, `mkdir -p` a new session's location, `xdg-open` a project folder,
-  and `gio trash` deleted sessions — none of which exist inside the sandbox.
+  `systemctl --user show-environment` to find the ssh-agent, and `gio trash`
+  deleted sessions — none of which exist inside the sandbox.
 
 It never needs broad home access: terminals open as host processes, so they
 already see your real files, and a new session's directory is created out there
@@ -127,3 +128,20 @@ It honours your system default, in this order:
    (kgx), gnome-terminal, konsole, kitty, alacritty, foot, wezterm, xterm
 
 Set `TERMINAL=ghostty` (or whatever you use) to force a specific one.
+
+### The ssh-agent
+
+The command each terminal runs starts by exporting `SSH_AUTH_SOCK`, so `git
+push` over SSH works there without a passphrase prompt. That has to be done
+explicitly, because three separate layers drop the variable. Flatpak does not
+put it in the sandbox, `flatpak-spawn` gives the host command the sandbox's
+environment where it was never set, and a login shell on the host does not set
+it either, since the desktop session keeps it in the systemd user environment
+rather than in profile files. The value is read back from `systemctl --user
+show-environment`.
+
+It is exported inside the command rather than passed as `flatpak-spawn --env`.
+Terminals that run as a single-instance daemon hand the command to an existing
+process, and an environment requested at spawn time never arrives. If the app
+already has an agent of its own, which is the case when it runs outside
+Flatpak, nothing is added. If no agent is found, the command is unchanged.
