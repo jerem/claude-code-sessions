@@ -44,12 +44,18 @@ SESSION_COLORS = {
 
 
 def session_css():
-    rules = [".session-dot { min-width: 10px; min-height: 10px;"
-             " border-radius: 9999px; }",
-             ".color-swatch { min-width: 22px; min-height: 22px;"
+    """Style for the colour bar and the swatches that set it.
+
+    The bar is an inset box-shadow on the row rather than a widget, because a
+    widget in the row would indent the title of coloured rows and leave them
+    out of line with every other row.
+    """
+    rules = [".color-swatch { min-width: 22px; min-height: 22px;"
              " padding: 0; }"]
     for name, value in SESSION_COLORS.items():
-        rules.append(f".session-dot.{name}, .color-swatch.{name} "
+        rules.append(f"row.session-{name} "
+                     f"{{ box-shadow: inset 4px 0 0 {value}; }}")
+        rules.append(f".color-swatch.{name} "
                      f"{{ background-image: none; background-color: {value}; }}")
     return "\n".join(rules).encode()
 
@@ -747,12 +753,6 @@ class SessionRow(Adw.ActionRow):
         self.set_subtitle_lines(1)
         self.set_activatable(True)
 
-        # Colour dot (first prefix). Always present so rows stay aligned, and
-        # shown only once a colour is set.
-        self.dot = Gtk.Box(valign=Gtk.Align.CENTER)
-        self.dot.add_css_class("session-dot")
-        self.dot.set_margin_end(2)
-        self.add_prefix(self.dot)
         self._refresh_color()
 
         # Star toggle (prefix).
@@ -831,11 +831,9 @@ class SessionRow(Adw.ActionRow):
 
     def _refresh_color(self):
         for name in SESSION_COLORS:
-            self.dot.remove_css_class(name)
-        color = self.session.color
-        if color:
-            self.dot.add_css_class(color)
-        self.dot.set_visible(bool(color))
+            self.remove_css_class(f"session-{name}")
+        if self.session.color:
+            self.add_css_class(f"session-{self.session.color}")
 
     def _refresh_title(self):
         self.set_title(GLib.markup_escape_text(self.session.title))

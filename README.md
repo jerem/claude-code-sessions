@@ -104,8 +104,10 @@ via `flatpak documents` on the host.
   portal wants a file descriptor for a directory we have no way to open from in
   here. Falls back to `gio open` if `xdg-open` isn't installed, and says so if
   the directory is gone.
-- **Colour** — a session coloured with `/color` shows a dot of that colour in
-  the list, and the swatches at the top of *⋮* set one from here. Like the
+- **Colour** — a session coloured with `/color` gets a bar of that colour down
+  the leading edge of its row, and the swatches at the top of *⋮* set one from
+  here. The bar is an inset `box-shadow` on the row rather than a widget, so a
+  coloured row keeps its title in line with every other row. Like the
   rename, it appends the same `agent-color` entry Claude Code writes, so the
   colour also applies inside Claude Code. The eraser swatch clears it, which is
   what `/color default` does. The colour name is searchable, so typing `pink`
