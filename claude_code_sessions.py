@@ -719,11 +719,23 @@ class SessionRow(Adw.ActionRow):
         resume.connect("clicked", lambda *_: on_resume(self.session))
         self.add_suffix(resume)
 
-        # Overflow menu: Open folder, Rename…, Delete.
+        # Overflow menu: Open folder, Rename…, Delete. Filled the first time it
+        # is opened. With a few hundred sessions listed, building a popover per
+        # row that nobody opens costs more than the rest of the row together.
         menu = Gtk.MenuButton(icon_name="view-more-symbolic",
                               valign=Gtk.Align.CENTER)
         menu.add_css_class("flat")
         menu.set_tooltip_text("More actions")
+        menu.set_create_popup_func(
+            self._fill_menu, (on_open, on_rename, on_delete))
+        self.add_suffix(menu)
+
+        self.connect("activated", lambda *_: on_resume(self.session))
+
+    def _fill_menu(self, button, callbacks):
+        if button.get_popover() is not None:
+            return
+        on_open, on_rename, on_delete = callbacks
         popover = Gtk.Popover(has_arrow=False)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         for label, cb, extra in (
@@ -740,10 +752,7 @@ class SessionRow(Adw.ActionRow):
                          lambda _b, fn=cb: (popover.popdown(), fn()))
             box.append(item)
         popover.set_child(box)
-        menu.set_popover(popover)
-        self.add_suffix(menu)
-
-        self.connect("activated", lambda *_: on_resume(self.session))
+        button.set_popover(popover)
 
     def _refresh_title(self):
         self.set_title(GLib.markup_escape_text(self.session.title))
