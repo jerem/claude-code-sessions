@@ -68,7 +68,9 @@ via `flatpak documents` on the host.
 - **The index** — logs get large (a long session can reach hundreds of
   megabytes), and re-reading them all on every scan does not scale. Parsed state
   is cached per file in `$XDG_CACHE_HOME/claude-code-sessions/index.json`,
-  including the byte offset parsing stopped at. Session logs are append-only, so
+  including the byte offset parsing stopped at. Bumping its version discards
+  what is cached, which is how a new field such as the session colour gets
+  picked up for logs already indexed. Session logs are append-only, so
   an unchanged file costs a `stat()` and a grown one costs only its new bytes —
   a file that gained 2 KB is 2 KB of reading, not 350 MB. A file that shrank was
   rewritten rather than appended to, so it is parsed again from the top. Only
@@ -102,6 +104,12 @@ via `flatpak documents` on the host.
   portal wants a file descriptor for a directory we have no way to open from in
   here. Falls back to `gio open` if `xdg-open` isn't installed, and says so if
   the directory is gone.
+- **Colour** — a session coloured with `/color` shows a dot of that colour in
+  the list, and the swatches at the top of *⋮* set one from here. Like the
+  rename, it appends the same `agent-color` entry Claude Code writes, so the
+  colour also applies inside Claude Code. The eraser swatch clears it, which is
+  what `/color default` does. The colour name is searchable, so typing `pink`
+  finds the pink ones.
 - **Star** — the star toggle moves a session into a **Favorites** section shown
   above the rest (each section ordered most-recent first). Stars persist in the
   app's config directory.

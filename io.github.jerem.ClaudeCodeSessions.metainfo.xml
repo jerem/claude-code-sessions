@@ -23,6 +23,7 @@
       <li>Resume any session in your default terminal with one click</li>
       <li>Start a new named session in any directory, creating a folder from the name</li>
       <li>Open a session's working directory in your file manager</li>
+      <li>See and set the session colour set by /color</li>
       <li>Star sessions to keep them in a Favorites section</li>
       <li>Rename sessions, or delete ones you no longer need (moved to the trash)</li>
     </ul>

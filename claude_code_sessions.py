@@ -21,7 +21,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
 APP_ID = "io.github.jerem.ClaudeCodeSessions"
@@ -32,6 +32,26 @@ STAR_PATH = (Path(GLib.get_user_config_dir())
 # Parsed-session cache. Regenerable, so it lives in the cache dir.
 INDEX_PATH = (Path(GLib.get_user_cache_dir())
               / "claude-code-sessions" / "index.json")
+
+
+# The palette /color offers. "default" clears it, and anything we don't know
+# is treated the same way.
+SESSION_COLORS = {
+    "red": "#e01b24", "blue": "#3584e4", "green": "#2ec27e",
+    "yellow": "#e5a50a", "purple": "#9141ac", "orange": "#ff7800",
+    "pink": "#d56199", "cyan": "#1c9ba8",
+}
+
+
+def session_css():
+    rules = [".session-dot { min-width: 10px; min-height: 10px;"
+             " border-radius: 9999px; }",
+             ".color-swatch { min-width: 22px; min-height: 22px;"
+             " padding: 0; }"]
+    for name, value in SESSION_COLORS.items():
+        rules.append(f".session-dot.{name}, .color-swatch.{name} "
+                     f"{{ background-image: none; background-color: {value}; }}")
+    return "\n".join(rules).encode()
 
 
 # --------------------------------------------------------------------------- #
@@ -131,14 +151,17 @@ class Query:
 # --------------------------------------------------------------------------- #
 class Session:
     __slots__ = ("session_id", "cwd", "title", "mtime", "path", "search_blob",
-                 "_tokens")
+                 "color", "_tokens")
 
-    def __init__(self, session_id, cwd, title, mtime, path, search_blob):
+    def __init__(self, session_id, cwd, title, mtime, path, search_blob,
+                 color=None):
         self.session_id = session_id
         self.cwd = cwd
         self.title = title
         self.mtime = mtime
         self.path = path
+        # One of SESSION_COLORS, or None. Set with /color, or from the row menu.
+        self.color = color
         # Lowercased haystack: title + dir + id + the user-side conversation.
         self.search_blob = search_blob
         self._tokens = None
@@ -188,7 +211,8 @@ def _user_text(raw):
 
 def _blank_state():
     return {"offset": 0, "cwd": None, "ai_title": None, "custom_title": None,
-            "first_prompt": None, "prompts": "", "prompt_chars": 0}
+            "color": None, "first_prompt": None, "prompts": "",
+            "prompt_chars": 0}
 
 
 def _read_into(path, state):
@@ -217,6 +241,8 @@ def _read_into(path, state):
             if b'"customTitle"' in raw:
                 state["custom_title"] = (_json_get(raw, "customTitle")
                                          or state["custom_title"])
+            if b'"agentColor"' in raw:
+                state["color"] = _json_get(raw, "agentColor") or state["color"]
             if (state["prompt_chars"] < PROMPT_CAP
                     and (b'"type":"user"' in raw or b'"type": "user"' in raw)):
                 txt = _user_text(raw)
@@ -259,8 +285,12 @@ def parse_session(path, index=None):
     if len(display_title) > 90:
         display_title = display_title[:89] + "…"
 
+    # Only a colour we know how to draw; /color default lands here as "default".
+    color = state.get("color")
+    color = color if color in SESSION_COLORS else None
+
     blob = " ".join([state["custom_title"] or "", state["ai_title"] or "",
-                     cwd, path.stem, state["prompts"]]).lower()
+                     color or "", cwd, path.stem, state["prompts"]]).lower()
 
     return Session(
         session_id=path.stem,
@@ -269,6 +299,7 @@ def parse_session(path, index=None):
         mtime=st.st_mtime,
         path=str(path),
         search_blob=blob,
+        color=color,
     )
 
 
@@ -283,7 +314,7 @@ class Index:
     a cold start after the first is a stat() per file too.
     """
 
-    VERSION = 1
+    VERSION = 2      # entries from v1 predate the session colour
 
     def __init__(self):
         self.entries = {}
@@ -398,6 +429,18 @@ class Stars:
             tmp.replace(STAR_PATH)  # atomic swap
         except OSError:
             pass
+
+
+def set_session_color(session, color):
+    """Persist a colour by appending the same entry `/color` writes.
+
+    `/color default` clears it, and that is what passing None here does.
+    """
+    entry = {"type": "agent-color",
+             "agentColor": color or "default",
+             "sessionId": session.session_id}
+    with open(session.path, "a") as fh:
+        fh.write(json.dumps(entry) + "\n")
 
 
 def rename_session(session, new_title):
@@ -693,7 +736,7 @@ def shlq(s):
 # --------------------------------------------------------------------------- #
 class SessionRow(Adw.ActionRow):
     def __init__(self, session, stars, on_resume, on_open, on_rename, on_delete,
-                 on_star_changed):
+                 on_color, on_star_changed):
         super().__init__()
         self.session = session
         self.stars = stars
@@ -703,6 +746,14 @@ class SessionRow(Adw.ActionRow):
         self.set_title_lines(1)
         self.set_subtitle_lines(1)
         self.set_activatable(True)
+
+        # Colour dot (first prefix). Always present so rows stay aligned, and
+        # shown only once a colour is set.
+        self.dot = Gtk.Box(valign=Gtk.Align.CENTER)
+        self.dot.add_css_class("session-dot")
+        self.dot.set_margin_end(2)
+        self.add_prefix(self.dot)
+        self._refresh_color()
 
         # Star toggle (prefix).
         self.star = Gtk.ToggleButton(valign=Gtk.Align.CENTER)
@@ -727,7 +778,7 @@ class SessionRow(Adw.ActionRow):
         menu.add_css_class("flat")
         menu.set_tooltip_text("More actions")
         menu.set_create_popup_func(
-            self._fill_menu, (on_open, on_rename, on_delete))
+            self._fill_menu, (on_open, on_rename, on_delete, on_color))
         self.add_suffix(menu)
 
         self.connect("activated", lambda *_: on_resume(self.session))
@@ -735,9 +786,33 @@ class SessionRow(Adw.ActionRow):
     def _fill_menu(self, button, callbacks):
         if button.get_popover() is not None:
             return
-        on_open, on_rename, on_delete = callbacks
+        on_open, on_rename, on_delete, on_color = callbacks
         popover = Gtk.Popover(has_arrow=False)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+
+        # Colour swatches, one per /color choice, then a clear button.
+        swatches = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        swatches.set_margin_start(6)
+        swatches.set_margin_end(6)
+        swatches.set_margin_top(4)
+        swatches.set_margin_bottom(4)
+        for name in (*SESSION_COLORS, None):
+            swatch = Gtk.Button(valign=Gtk.Align.CENTER)
+            swatch.add_css_class("circular")
+            swatch.add_css_class("color-swatch")
+            if name is None:
+                swatch.set_icon_name("edit-clear-symbolic")
+                swatch.add_css_class("flat")
+                swatch.set_tooltip_text("No colour")
+            else:
+                swatch.add_css_class(name)
+                swatch.set_tooltip_text(name.capitalize())
+            swatch.connect("clicked", lambda _b, c=name:
+                           (popover.popdown(), on_color(self, c)))
+            swatches.append(swatch)
+        box.append(swatches)
+        box.append(Gtk.Separator())
+
         for label, cb, extra in (
             ("Open folder", lambda: on_open(self.session), None),
             ("Rename…", lambda: on_rename(self), None),
@@ -754,6 +829,14 @@ class SessionRow(Adw.ActionRow):
         popover.set_child(box)
         button.set_popover(popover)
 
+    def _refresh_color(self):
+        for name in SESSION_COLORS:
+            self.dot.remove_css_class(name)
+        color = self.session.color
+        if color:
+            self.dot.add_css_class(color)
+        self.dot.set_visible(bool(color))
+
     def _refresh_title(self):
         self.set_title(GLib.markup_escape_text(self.session.title))
 
@@ -766,6 +849,7 @@ class SessionRow(Adw.ActionRow):
         self.session = session
         self._refresh_title()
         self._refresh_subtitle()
+        self._refresh_color()
 
     def _refresh_star_icon(self):
         active = self.star.get_active()
@@ -782,6 +866,13 @@ class SessionRow(Adw.ActionRow):
         self.session.title = new_title
         self.session.search_blob += " " + new_title.lower()
         self.session._tokens = None      # rebuilt on next use
+
+    def apply_new_color(self, color):
+        self.session.color = color
+        if color:
+            self.session.search_blob += " " + color
+            self.session._tokens = None
+        self._refresh_color()
         self._refresh_title()
 
 
@@ -914,13 +1005,14 @@ class Window(Adw.ApplicationWindow):
             if row is None:
                 row = SessionRow(s, self.stars, self._resume, self._open_folder,
                                  self._confirm_rename, self._confirm_delete,
-                                 self._on_star_changed)
+                                 self._set_color, self._on_star_changed)
                 self.rows_by_id[sid] = row
                 self.all_rows.append(row)
                 self._target_list(row).append(row)
             else:
                 old = row.session
-                if (old.title, old.mtime, old.cwd) != (s.title, s.mtime, s.cwd):
+                if ((old.title, old.mtime, old.cwd, old.color)
+                        != (s.title, s.mtime, s.cwd, s.color)):
                     row.update_session(s)
 
         if not self.all_rows:
@@ -1243,6 +1335,18 @@ class Window(Adw.ApplicationWindow):
         else:
             self._update_sections()
 
+    def _set_color(self, row, color):
+        if color == row.session.color:
+            return
+        try:
+            set_session_color(row.session, color)
+        except OSError as exc:
+            self.toast.add_toast(Adw.Toast(title=f"Couldn't set colour: {exc}"))
+            return
+        row.apply_new_color(color)
+        self.toast.add_toast(Adw.Toast(
+            title=f"Colour set to {color}" if color else "Colour cleared"))
+
     def _open_folder(self, session):
         if not host_isdir(session.cwd):
             self.toast.add_toast(
@@ -1278,6 +1382,11 @@ class App(Adw.Application):
 
     def do_startup(self):
         Adw.Application.do_startup(self)
+        provider = Gtk.CssProvider()
+        provider.load_from_data(session_css())
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(), provider,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         action = Gio.SimpleAction.new("new-session", None)
         action.connect("activate", self._on_new_session_action)
         self.add_action(action)
