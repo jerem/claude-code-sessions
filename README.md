@@ -106,11 +106,12 @@ via `flatpak documents` on the host.
   the directory is gone.
 - **Colour** — a session coloured with `/color` gets a bar of that colour down
   the leading edge of its row, and the swatches at the top of *⋮* set one from
-  here. The bar is a background layer on the row rather than a widget, so a
-  coloured row keeps its title in line with every other row. On the first and
-  last row of a section it stops where the boxed list's rounded corner starts,
-  because a background is clipped to that curve and the bar would otherwise
-  taper into a sliver. Like the
+  here. The bar is the row's left border, which every row reserves and leaves
+  transparent until a colour is set, so colouring a session never shifts its
+  title out of line with the rows around it. It is a border rather than a
+  background because a boxed list rounds the corners of its first and last row.
+  A background is clipped to that curve and tapers into a sliver there, while a
+  border keeps its width and follows it. Like the
   rename, it appends the same `agent-color` entry Claude Code writes, so the
   colour also applies inside Claude Code. The eraser swatch clears it, which is
   what `/color default` does. The colour name is searchable, so typing `pink`
