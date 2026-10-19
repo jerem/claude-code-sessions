@@ -46,20 +46,21 @@ SESSION_COLORS = {
 def session_css():
     """Style for the colour bar and the swatches that set it.
 
-    The bar is the row's left border. Every row reserves it, transparent until
-    a colour is set, so colouring a session never shifts its title out of line
-    with the rows around it.
-
-    A border rather than a background, because a boxed list rounds the corners
-    of its first and last row: a background is clipped to that curve and tapers
-    into a sliver there, while a border keeps its width and follows the curve.
+    The bar is a background layer on the row, not a widget and not a border.
+    A widget would indent the title of coloured rows and leave them out of line
+    with the rest. A border is painted outside the row's background, so at the
+    rounded corner a boxed list gives its first and last row it separates from
+    the row and leaves a gap. A background stays inside that corner and follows
+    it, and at this width the corner reads as a rounded corner rather than as
+    the bar thinning away.
     """
-    rules = [
-        ".color-swatch { min-width: 22px; min-height: 22px; padding: 0; }",
-        "row.session-row { border-left: 5px solid transparent; }",
-    ]
+    rules = [".color-swatch { min-width: 22px; min-height: 22px; padding: 0; }"]
     for name, value in SESSION_COLORS.items():
-        rules.append(f"row.session-{name} {{ border-left-color: {value}; }}")
+        rules.append(f"row.session-{name} {{"
+                     f" background-image: linear-gradient({value}, {value});"
+                     f" background-size: 9px 100%;"
+                     f" background-position: left top;"
+                     f" background-repeat: no-repeat; }}")
         rules.append(f".color-swatch.{name} "
                      f"{{ background-image: none; background-color: {value}; }}")
     return "\n".join(rules).encode()
@@ -758,8 +759,6 @@ class SessionRow(Adw.ActionRow):
         self.set_subtitle_lines(1)
         self.set_activatable(True)
 
-        # Carries the colour bar, transparent until a colour is set.
-        self.add_css_class("session-row")
         self._refresh_color()
 
         # Star toggle (prefix).
