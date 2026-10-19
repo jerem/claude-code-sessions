@@ -46,15 +46,33 @@ SESSION_COLORS = {
 def session_css():
     """Style for the colour bar and the swatches that set it.
 
-    The bar is an inset box-shadow on the row rather than a widget, because a
-    widget in the row would indent the title of coloured rows and leave them
-    out of line with every other row.
+    The bar is painted as a background layer on the row rather than packed into
+    it as a widget, because a widget would indent the title of coloured rows and
+    leave them out of line with every other row.
+
+    It runs the full height of the row, except on the first and last row of a
+    section. A boxed list rounds those two corners, and a background is clipped
+    to that curve, which left the bar tapering into a sliver. There the bar
+    stops where the curve starts, so it stays a straight rectangle.
     """
-    rules = [".color-swatch { min-width: 22px; min-height: 22px;"
-             " padding: 0; }"]
+    bar, radius = 5, 12         # bar width, and the boxed list's corner radius
+    rules = [
+        ".color-swatch { min-width: 22px; min-height: 22px; padding: 0; }",
+        f"row.session-colored {{ background-repeat: no-repeat;"
+        f" background-size: {bar}px 100%; background-position: left top; }}",
+        f"row.session-colored:first-child {{"
+        f" background-size: {bar}px calc(100% - {radius}px);"
+        f" background-position: left bottom; }}",
+        f"row.session-colored:last-child {{"
+        f" background-size: {bar}px calc(100% - {radius}px);"
+        f" background-position: left top; }}",
+        f"row.session-colored:only-child {{"
+        f" background-size: {bar}px calc(100% - {2 * radius}px);"
+        f" background-position: left center; }}",
+    ]
     for name, value in SESSION_COLORS.items():
         rules.append(f"row.session-{name} "
-                     f"{{ box-shadow: inset 4px 0 0 {value}; }}")
+                     f"{{ background-image: linear-gradient({value}, {value}); }}")
         rules.append(f".color-swatch.{name} "
                      f"{{ background-image: none; background-color: {value}; }}")
     return "\n".join(rules).encode()
@@ -832,8 +850,15 @@ class SessionRow(Adw.ActionRow):
     def _refresh_color(self):
         for name in SESSION_COLORS:
             self.remove_css_class(f"session-{name}")
-        if self.session.color:
-            self.add_css_class(f"session-{self.session.color}")
+        color = self.session.color
+        if color:
+            self.add_css_class(f"session-{color}")
+        # Carries the bar's geometry, so it is written once rather than per
+        # colour, and the end-of-list cases with it.
+        if color:
+            self.add_css_class("session-colored")
+        else:
+            self.remove_css_class("session-colored")
 
     def _refresh_title(self):
         self.set_title(GLib.markup_escape_text(self.session.title))
