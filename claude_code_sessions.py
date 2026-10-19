@@ -51,14 +51,14 @@ def session_css():
     with the rest. A border is painted outside the row's background, so at the
     rounded corner a boxed list gives its first and last row it separates from
     the row and leaves a gap. A background stays inside that corner and follows
-    it, and at this width the corner reads as a rounded corner rather than as
-    the bar thinning away.
+    it. The width is a balance: too narrow and the corner tapers into a sliver,
+    too wide and the bar reads as a block of colour down the list.
     """
     rules = [".color-swatch { min-width: 22px; min-height: 22px; padding: 0; }"]
     for name, value in SESSION_COLORS.items():
         rules.append(f"row.session-{name} {{"
                      f" background-image: linear-gradient({value}, {value});"
-                     f" background-size: 9px 100%;"
+                     f" background-size: 6px 100%;"
                      f" background-position: left top;"
                      f" background-repeat: no-repeat; }}")
         rules.append(f".color-swatch.{name} "
